@@ -1,2 +1,6 @@
-"""Shared audio service helpers."""
+"""音频能力的公共导出入口。
+
+这里主要承载“音频转写（speech-to-text）”这一条能力链路的上层封装，
+把具体 provider 适配逻辑和应用层入口拆开，方便 WebUI、频道层、API 层复用。
+"""
 

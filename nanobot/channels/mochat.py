@@ -257,7 +257,12 @@ class MochatConfig(Base):
 # ---------------------------------------------------------------------------
 
 class MochatChannel(BaseChannel):
-    """Mochat channel using socket.io with fallback polling workers."""
+    """【中文名称】Mochat 渠道适配器
+
+    通过 Socket.IO 连接（支持 HTTP 长轮询回退）接入 MoChat 即时通讯平台。
+    支持私聊、群聊、文件上传和流式消息编辑。
+
+    Mochat channel using socket.io with fallback polling workers."""
 
     name = "mochat"
     display_name = "Mochat"

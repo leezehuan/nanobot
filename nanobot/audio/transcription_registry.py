@@ -1,8 +1,17 @@
-"""Registry for speech-to-text providers.
+"""语音转文字 provider 注册表。
 
-Provider-specific HTTP adapters live in ``nanobot.providers.transcription``.
-This module is the app-level source of truth for provider names, aliases,
-default models, and adapter class paths.
+【中文名称】转写服务注册表
+
+这个模块是应用层关于“有哪些转写 provider 可用”的单一事实来源。
+它记录的信息包括：
+
+- provider 正式名称
+- 默认模型名
+- 适配器类的导入路径
+- 可选别名
+
+真正的 HTTP 适配器实现仍然在 `nanobot.providers.transcription`，
+而这里负责“登记”和“查找”。
 """
 
 from __future__ import annotations
@@ -14,7 +23,13 @@ from typing import Any, Protocol
 
 
 class TranscriptionProviderAdapter(Protocol):
-    """Runtime protocol implemented by provider-specific transcription adapters."""
+    """转写适配器在运行期必须满足的协议。
+
+    这里使用 `Protocol` 的好处是：
+
+    - 不要求所有 provider 真的继承同一个基类；
+    - 只要它们“长得像”这个接口，就能被当成合法适配器使用。
+    """
 
     def __init__(
         self,
@@ -29,12 +44,14 @@ class TranscriptionProviderAdapter(Protocol):
 
 @dataclass(frozen=True)
 class TranscriptionProviderSpec:
+    """单个转写 provider 的静态描述信息。"""
     name: str
     default_model: str
     adapter: str
     aliases: tuple[str, ...] = ()
 
     def load_adapter(self) -> type[TranscriptionProviderAdapter]:
+        """按 `模块路径:类名` 的形式动态加载适配器类。"""
         module_name, _, class_name = self.adapter.partition(":")
         if not module_name or not class_name:
             raise RuntimeError(f"Invalid transcription adapter path: {self.adapter}")
@@ -81,14 +98,17 @@ _BY_ALIAS = {alias: spec for spec in TRANSCRIPTION_PROVIDERS for alias in spec.a
 
 
 def transcription_provider_names() -> tuple[str, ...]:
+    """返回所有已注册 provider 的正式名称。"""
     return tuple(spec.name for spec in TRANSCRIPTION_PROVIDERS)
 
 
 def get_transcription_provider(name: str) -> TranscriptionProviderSpec | None:
+    """按正式名称获取 provider 描述对象。"""
     return _BY_NAME.get(name)
 
 
 def resolve_transcription_provider(value: Any) -> TranscriptionProviderSpec | None:
+    """按正式名称或别名解析 provider。"""
     if not isinstance(value, str):
         return None
     name = value.strip().lower()

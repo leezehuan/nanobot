@@ -840,10 +840,35 @@ class Consolidator:
         *,
         session_key: str | None = None,
     ) -> str | None:
-        """调用 LLM 摘要一批旧消息，并把摘要写入 history。
+        """调用 LLM 摘要一批旧消息，并把摘要写入 history.jsonl。
 
-        成功时返回摘要文本；没有内容可归档时返回 ``None``。
-        如果摘要失败，则会自动走 ``raw_archive()`` 做降级保存。
+        【中文名称】归档压缩
+
+        【功能说明】
+        把一批旧消息交给 LLM 生成摘要文本，然后将摘要持久化到 MemoryStore 的
+        history.jsonl 文件中。这样后续回合就可以通过"最近历史摘要"的方式
+        间接保留对话上下文，而不用把完整原始消息都塞进 prompt。
+
+        【降级策略】
+        如果 LLM 调用失败（网络错误、模型不可用等），会自动走 raw_archive() 降级：
+        不依赖模型摘要，直接把原始消息以 [RAW] 标记写入 history.jsonl。
+        这样至少不会丢历史，只是这段历史以后续迁的方式保留。
+
+        【完整处理流程】
+        1. 如果 messages 为空 → 直接返回 None
+        2. 用 MemoryStore._format_messages() 把消息格式化成文本
+        3. _truncate_to_token_budget() 裁剪到安全 token 预算内
+        4. 调用 provider.chat_with_retry() 让 LLM 生成摘要（不带工具）
+        5. 如果 LLM 返回错误 → 抛异常进入降级分支
+        6. 把摘要文本通过 store.append_history() 写入 history.jsonl
+        7. 如果任何步骤失败 → store.raw_archive() 做降级保存
+
+        【参数说明】
+        - messages: list[dict] → 要压缩的一组消息
+        - session_key: str | None → 关联的会话键（写入 history 时标记归属）
+
+        【返回值】
+        - str | None: 成功时返回 LLM 生成的摘要文本；无内容时返回 None
         """
         if not messages:
             return None
@@ -887,8 +912,30 @@ class Consolidator:
     ) -> None:
         """循环压缩旧消息，直到 prompt 回到安全预算范围内。
 
-        预算会预留 completion token 和一段安全缓冲，
-        防止请求在边界附近意外超出模型上下文窗口。
+        【中文名称】按 token 预算压缩会话
+
+        【功能说明】
+        这是 CloudMemory 两阶段记忆架构中的"背景整合"阶段。当会话的未压缩尾部
+        prompt token 超出安全阈值（context_window_tokens - max_completion_tokens - 1024），
+        就会循环执行多轮压缩，每轮：
+        1. 先做 replay overflow 压缩 → 把会被消息回放窗口裁掉的消息提前归档
+        2. 估算当前 prompt token 数
+        3. 如果超出预算，则 pick_consolidation_boundary 找到安全的 user turn 边界
+        4. 调用 archive() 让 LLM 把这段消息压缩成摘要
+        5. 推进 session.last_consolidated 边界
+        6. 重新估算，如果仍超标则继续下一轮（最多 5 轮）
+
+        【预算计算】
+        input_token_budget = context_window_tokens - max_completion_tokens - 1024
+        consolidation_target = input_budget * consolidation_ratio（默认 0.5）
+
+        【调用时机】
+        - AgentLoop._state_build() 中每次回合开始前
+        - 作为后台任务在回合结束后异步执行
+
+        【参数说明】
+        - session: Session → 要压缩的会话对象
+        - replay_max_messages: int | None → 消息回放窗口上限
         """
         if self.context_window_tokens <= 0:
             return

@@ -1,8 +1,17 @@
-"""Pairing store for DM sender approval.
+"""私聊发送者配对授权的存储层。
 
-Persistent storage at ``~/.nanobot/pairing.json`` keeps approved senders
-and pending pairing codes per channel.  The store is designed for
-private-assistant scale: small JSON file, simple locking, no external DB.
+【中文名称】配对授权存储
+
+数据会持久化到 `~/.nanobot/pairing.json`，里面主要保存两类内容：
+
+1. 已授权用户（approved）
+2. 待审核配对码（pending）
+
+这个设计很轻量，适合“个人助手 / 小规模使用”场景：
+
+- 用 JSON 文件即可；
+- 用线程锁保护并发；
+- 不引入数据库。
 """
 
 from __future__ import annotations
@@ -20,9 +29,9 @@ from loguru import logger
 from nanobot.config.paths import get_data_dir
 from nanobot.utils.helpers import _write_text_atomic
 
-# threading.Lock is used so store functions remain callable from both sync CLI
-# and async channel handlers.  At private-assistant scale (small JSON file,
-# sub-millisecond operations) the brief block is acceptable.
+# 这里使用线程锁，是为了让这套存储函数既能被同步 CLI 调用，
+# 也能被异步频道处理器安全复用。由于配对文件很小、操作很短，
+# 这种粗粒度锁在当前规模下是可以接受的。
 _LOCK = threading.Lock()
 _ALPHABET = string.ascii_uppercase + string.digits
 _CODE_LENGTH = 8  # e.g. ABCD-EFGH
@@ -30,10 +39,16 @@ _TTL_DEFAULT_S = 600  # 10 minutes
 
 
 def _store_path() -> Path:
+    """返回配对授权 JSON 文件的固定存储路径。"""
     return get_data_dir() / "pairing.json"
 
 
 def _load() -> dict[str, Any]:
+    """从磁盘加载配对授权数据。
+
+    返回的 `approved` 会被转成 `set`，这样后续查找某个 sender 是否已授权时
+    可以做到 O(1)。
+    """
     path = _store_path()
     try:
         with open(path, encoding="utf-8") as f:
@@ -44,16 +59,17 @@ def _load() -> dict[str, Any]:
         logger.warning("Corrupted pairing store, resetting")
         return {"approved": {}, "pending": {}}
 
-    # Convert approved lists to sets for O(1) lookup
+    # 把磁盘上的 list 转成 set，便于快速判断“某个用户是否已授权”。
     for channel, users in data.get("approved", {}).items():
         data["approved"][channel] = set(users)
     return data
 
 
 def _save(data: dict[str, Any]) -> None:
+    """把内存中的配对数据安全写回磁盘。"""
     path = _store_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Convert sets back to lists for JSON serialization
+    # JSON 不能直接序列化 set，所以落盘前要转回 list。
     payload = {
         "approved": {ch: sorted(list(users)) for ch, users in data.get("approved", {}).items()},
         "pending": dict(data.get("pending", {})),
@@ -62,7 +78,7 @@ def _save(data: dict[str, Any]) -> None:
 
 
 def _gc_pending(data: dict[str, Any]) -> None:
-    """Remove expired pending entries in-place."""
+    """原地清理已经过期的待审核配对码。"""
     now = time.time()
     pending: dict[str, Any] = data.get("pending", {})
     expired = [code for code, info in pending.items() if info.get("expires_at", 0) < now]
@@ -75,9 +91,9 @@ def generate_code(
     sender_id: str,
     ttl: int = _TTL_DEFAULT_S,
 ) -> str:
-    """Create a new pairing code for *sender_id* on *channel*.
+    """为某个频道里的发送者生成新的配对码。
 
-    Returns the code (e.g. ``"ABCD-EFGH"``).
+    返回值形如 `ABCD-EFGH`，方便用户手动抄写或复制给主人审核。
     """
     with _LOCK:
         data = _load()
@@ -97,10 +113,10 @@ def generate_code(
 
 
 def approve_code(code: str) -> tuple[str, str] | None:
-    """Approve a pending pairing code.
+    """批准一个待审核配对码。
 
-    Returns ``(channel, sender_id)`` on success, or ``None`` if the code
-    does not exist or has expired.
+    成功时返回 `(channel, sender_id)`，这样调用方就知道究竟放行了谁。
+    如果配对码不存在或已经过期，则返回 `None`。
     """
     with _LOCK:
         data = _load()
@@ -118,10 +134,7 @@ def approve_code(code: str) -> tuple[str, str] | None:
 
 
 def deny_code(code: str) -> bool:
-    """Reject and discard a pending pairing code.
-
-    Returns ``True`` if the code existed and was removed.
-    """
+    """拒绝一个待审核配对码，并把它从待审核列表中删除。"""
     with _LOCK:
         data = _load()
         _gc_pending(data)
@@ -135,7 +148,7 @@ def deny_code(code: str) -> bool:
 
 
 def is_approved(channel: str, sender_id: str) -> bool:
-    """Check whether *sender_id* has been approved on *channel*."""
+    """检查某个发送者在指定频道里是否已经通过授权。"""
     with _LOCK:
         data = _load()
         approved: dict[str, set[str]] = data.get("approved", {})
@@ -143,7 +156,7 @@ def is_approved(channel: str, sender_id: str) -> bool:
 
 
 def list_pending() -> list[dict[str, Any]]:
-    """Return all non-expired pending pairing requests."""
+    """返回所有仍未过期的待审核配对请求。"""
     with _LOCK:
         data = _load()
         _gc_pending(data)
@@ -154,10 +167,7 @@ def list_pending() -> list[dict[str, Any]]:
 
 
 def revoke(channel: str, sender_id: str) -> bool:
-    """Remove an approved sender from *channel*.
-
-    Returns ``True`` if the sender was present and removed.
-    """
+    """撤销某个已授权发送者在指定频道里的访问权限。"""
     with _LOCK:
         data = _load()
         approved: dict[str, set[str]] = data.get("approved", {})
@@ -173,14 +183,14 @@ def revoke(channel: str, sender_id: str) -> bool:
 
 
 def get_approved(channel: str) -> list[str]:
-    """Return all approved sender IDs for *channel*."""
+    """列出某个频道中已授权的所有发送者 ID。"""
     with _LOCK:
         data = _load()
         return sorted(data.get("approved", {}).get(channel, set()))
 
 
 def format_pairing_reply(code: str) -> str:
-    """Return the pairing-code message sent to unrecognised DM senders."""
+    """生成发给“陌生私聊用户”的配对提示消息。"""
     return (
         "Hi there! This assistant only responds to approved users.\n\n"
         f"Your pairing code is: `{code}`\n\n"
@@ -190,16 +200,23 @@ def format_pairing_reply(code: str) -> str:
 
 
 def format_expiry(expires_at: float) -> str:
-    """Return a human-readable expiry string (e.g. ``"120s"`` or ``"expired"``)."""
+    """把过期时间格式化成用户可读文本。"""
     remaining = int(expires_at - time.time())
     return f"{remaining}s" if remaining > 0 else "expired"
 
 
 def handle_pairing_command(channel: str, subcommand_text: str) -> str:
-    """Execute a pairing subcommand and return the reply text.
+    """执行一条 `/pairing` 子命令，并返回给用户的回复文本。
 
-    This is a pure function (no side effects other than store mutations)
-    so it can be used from both the CLI and the agent CommandRouter.
+    你可以把它看成配对系统自己的一个“小命令路由器”：
+
+    - `list`
+    - `approve <code>`
+    - `deny <code>`
+    - `revoke ...`
+
+    它本身不依赖具体频道实现，因此既能给 CLI 用，也能给 Agent 的
+    CommandRouter 复用。
     """
     parts = subcommand_text.split()
     sub = parts[0] if parts else "list"

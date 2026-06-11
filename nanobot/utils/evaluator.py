@@ -48,11 +48,48 @@ async def evaluate_response(
     model: str,
     default_notify: bool = True,
 ) -> bool:
-    """判断后台任务结果是否应该发给用户。
+    """使用 LLM 判断后台任务结果是否应该通知用户。
 
-    失败兜底策略由 ``default_notify`` 决定：
-    - cron 往往倾向于“失败时也通知”
-    - heartbeat 往往倾向于“失败时安静忽略”
+    【中文名称】后台结果评估
+
+    【功能说明】
+    当 heartbeat / cron 等后台任务执行完毕后，不是直接把结果推送给用户，
+    而是先做一次轻量级 LLM 评估：模型通过调用 evaluate_notification 函数，
+    声明 "should_notify=true/false" 来判断结果是否值得打扰用户。
+
+    【为什么需要这个函数】
+    如果不做评估，用户会收到大量"无事发生"的例行通知，造成骚扰。
+    这个函数起到了"第二次决策"的作用，把"是否需要通知"的决策权下放给 LLM 本身。
+
+    【完整的 3 个阶段】
+
+    Phase 1: LLM 评估调用
+      - system prompt: 从 templates/agent/evaluator.md 加载"评估者"角色提示
+      - user prompt: 注入 task_context（任务背景）+ response（后台执行结果）
+      - tools: 只有一个 evaluate_notification 函数（带 should_notify + reason 参数）
+      - 参数: temperature=0.0、max_tokens=256（评估不需要长回答）
+
+    Phase 2: 解析 LLM 决策
+      - 正常路径: LLM 返回 tool_call，从 arguments 里取出 should_notify
+      - 异常路径: LLM 返回了 tool_calls 但不允许执行 → 回退到 default_notify
+      - 无调用路径: LLM 没调用工具 → 回退到 default_notify
+
+    Phase 3: 兜底处理
+      - 任何异常都捕获并回退到 default_notify
+      - 这样即使 LLM 评估失败了，后台任务也不会被"静默丢弃"
+
+    【参数说明】
+    - response: 后台任务执行产生的最终文本（如搜索摘要、执行结论文本）
+    - task_context: 任务背景说明，例如 "heartbeat check" 或 "cron job: daily news summary"
+    - provider: LLMProvider 实例，用于执行评估 LLM 调用
+    - model: 评估所用的模型名（通常比主模型小，因为评估任务轻量）
+    - default_notify: 评估失败时的兜底行为
+        - True（cron 倾向）: 拿不准时就通知用户，宁可多报也不错失重要信息
+        - False（heartbeat 倾向）: 拿不准时就安静忽略，避免骚扰
+
+    【返回值】
+    - True: 结果值得通知用户（should_notify=true 或 评估失败 + default_notify=true）
+    - False: 结果可忽略（should_notify=false 或 评估失败 + default_notify=false）
     """
     try:
         llm_response = await provider.chat_with_retry(

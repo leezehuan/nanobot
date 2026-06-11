@@ -1,4 +1,35 @@
-"""Git-backed version control for memory files, using dulwich."""
+"""Git-backed version control for memory files, using dulwich.
+
+【中文名称】Git 版本存储
+
+【功能说明】
+以 Git 为后端，为 nanobot 的记忆文件（SOUL.md、USER.md、MEMORY.md）提供：
+- 自动提交（auto_commit）：每次记忆变更后自动落一个 commit
+- 历史浏览（log）：查看最近 N 次变更记录
+- 行级追溯（line_ages）：通过 blame 查看每行代码的最近修改时间
+- diff 对比（diff_commits）：查看两次提交之间的差异
+- 版本还原（revert）：回滚到指定 commit 的父版本
+
+【为什么需要它】
+agent 的记忆文件是长期积累的，如果某次自动编辑写坏了，用户可以通过
+git 历史回滚到健康版本。它本质上是一个"记忆安全保障"。
+
+【关键设计决策】
+- 使用 dulwich（纯 Python Git 实现），无需系统安装 git 命令
+- .gitignore 采用白名单策略：先忽略一切，再逐项放行 tracked_files
+- 首次 init 时会自动 touch 缺失的 tracked_files，确保初始 commit 有内容
+- 如果 workspace 本身已经在另一个 git 仓库内，则跳过嵌套仓库初始化
+
+【存储结构示例】
+workspace/
+  .git/                  # dulwich 初始化的 git 仓库
+  .gitignore             # 白名单策略：忽略全部，只放行 tracked_files
+  SOUL.md                # (tracked) agent 人格定义
+  USER.md                # (tracked) 用户偏好
+  memory/
+    MEMORY.md            # (tracked) 长期记忆
+  other_project_files/   # (NOT tracked) 不在白名单内，不会被提交
+"""
 
 from __future__ import annotations
 
@@ -13,12 +44,41 @@ from loguru import logger
 
 @dataclass
 class CommitInfo:
+    """一次 Git 提交的摘要信息。
+
+    【字段说明】
+    - sha: 短哈希值（前 8 位），用于展示和用户输入查找
+    - message: 提交信息（例如 "Dream consolidation" 或 "revert: undo abc12345"）
+    - timestamp: 人类可读的时间字符串（例如 "2026-06-11 14:30"）
+    """
+
     sha: str  # Short SHA (8 chars)
     message: str
     timestamp: str  # Formatted datetime
 
     def format(self, diff: str = "") -> str:
-        """Format this commit for display, optionally with a diff."""
+        """格式化当前 commit 为 Markdown 展示文本。
+
+        【参数说明】
+        - diff: 可选的 diff 文本（由 diff_commits 生成）
+
+        【返回值】
+        - 带 diff 时：三部分 —— 标题头、SHA+时间、```diff``` 代码块
+        - 不带 diff 时：仅标题头 + SHA+时间 + "(no file changes)"
+
+        【示例输出（有 diff）】
+        ## Dream consolidation
+        `abc12345` — 2026-06-11 14:30
+        ```diff
+        - old content
+        + new content
+        ```
+
+        【示例输出（无 diff）】
+        ## Dream consolidation
+        `abc12345` — 2026-06-11 14:30
+        (no file changes)
+        """
         header = f"## {self.message.splitlines()[0]}\n`{self.sha}` — {self.timestamp}\n"
         if diff:
             return f"{header}\n```diff\n{diff}\n```"
@@ -27,13 +87,37 @@ class CommitInfo:
 
 @dataclass
 class LineAge:
-    """Age of a single line based on git blame."""
+    """某一代码行距最后一次修改的天数。
+
+    【字段说明】
+    - age_days: 距今多少天（例如 0 表示今天刚改过，365 表示一年未动）
+
+    【使用场景】
+    - 记忆系统通过行级年龄判断哪些内容已经"冻结"、哪些还是"热的"
+    - Dream consolidation 时根据行龄决定是否触发记忆合并
+    """
 
     age_days: int  # days since last modification
 
 
 def _compute_line_ages(annotated) -> list[LineAge]:
-    """Convert annotate results to per-line ages."""
+    """把 dulwich annotate 的结果转换成 LineAge 列表。
+
+    【中文名称】计算行年龄
+
+    【输入】
+    - annotated: dulwich porcelain.annotate() 的返回值，格式为
+      [((commit, tree_entry), line_bytes), ...]
+
+    【处理逻辑】
+    对每一行：
+    1. 从 commit 对象的 commit_time 字段读取修改时间戳
+    2. 计算 now - commit_time 的天数差
+    3. 包装成 LineAge(age_days=N)
+
+    【返回值】
+    与输入行数等长的 LineAge 列表，按原始行顺序排列。
+    """
     now = datetime.now(tz=timezone.utc).date()
     ages: list[LineAge] = []
     for (commit, _tree_entry), _line_bytes in annotated:
@@ -43,23 +127,79 @@ def _compute_line_ages(annotated) -> list[LineAge]:
 
 
 class GitStore:
-    """Git-backed version control for memory files."""
+    """Git-backed version control for memory files.
+
+    【中文名称】Git 版本存储（主类）
+
+    【使用方式】
+    ```python
+    gs = GitStore(workspace, tracked_files=["SOUL.md", "USER.md", "memory/MEMORY.md"])
+    gs.init()                           # 初始化仓库（仅首次）
+    sha = gs.auto_commit("edit SOUL")   # 日常自动提交
+    history = gs.log(max_entries=20)    # 查看历史
+    gs.revert("abc12345")               # 回滚某次提交
+    ```
+
+    【关键方法一览】
+    初始化: init()
+    自动提交: auto_commit(message) -> sha | None
+    历史浏览: log(max_entries) -> [CommitInfo]
+    行级追溯: line_ages(file_path) -> [LineAge]
+    Diff: diff_commits(sha1, sha2) -> str
+    版本还原: revert(commit_sha) -> new_sha | None
+    """
 
     def __init__(self, workspace: Path, tracked_files: list[str]):
+        """初始化 GitStore。
+
+        【参数说明】
+        - workspace: 工作区根目录，.git 仓库会创建在此目录下
+        - tracked_files: 需要 Git 跟踪的文件清单（相对于 workspace 的相对路径）
+          例如 ["SOUL.md", "USER.md", "memory/MEMORY.md"]
+        """
         self._workspace = workspace
         self._tracked_files = tracked_files
 
     def is_initialized(self) -> bool:
-        """Check if the git repo has been initialized."""
+        """检查 .git 目录是否已存在。"""
         return (self._workspace / ".git").is_dir()
 
     # -- init ------------------------------------------------------------------
 
     def init(self) -> bool:
-        """Initialize a git repo if not already initialized.
+        """初始化 Git 仓库。
 
-        Creates .gitignore and makes an initial commit.
-        Returns True if a new repo was created, False if already exists.
+        【中文名称】初始化 Git 仓库
+
+        【完整流程（6 步）】
+
+        Step 1: 检查是否已初始化 → 已存在则直接返回 False
+
+        Step 2: 检查是否被嵌套在另一个 Git 仓库中
+           - 向上遍历父目录，找到 .git 就视为"已在仓库内"
+           - 支持 .git 文件和 .git 目录（兼容 worktree/submodule）
+           - 嵌套场景跳过初始化，并打 warning 日志
+
+        Step 3: dulwich.porcelain.init() 创建 .git
+
+        Step 4: 生成 .gitignore
+           - 采用白名单策略：第一行 "/*" 忽略全部
+           - 然后逐项用 "!路径/" 放行父目录
+           - 再逐项用 "!路径" 放行 tracked file
+           - 最后放行 "!.gitignore" 自身
+           - 如果 .gitignore 已存在，则合并而非覆盖
+
+        Step 5: 确保 tracked_files 全部存在
+           - 缺失的文件会创建空文件（touch）
+           - 这样首次 commit 有内容可提交
+
+        Step 6: 执行初始提交
+           - git add .gitignore + 所有 tracked_files
+           - git commit 消息为 "init: nanobot memory store"
+
+        【返回值】
+        - True: 新仓库创建成功
+        - False: 仓库已存在 / 在嵌套仓库中 / 初始化失败
         """
         if self.is_initialized():
             return False
@@ -94,15 +234,14 @@ class GitStore:
             else:
                 gitignore.write_text(dream_entries, encoding="utf-8")
 
-            # Ensure tracked files exist (touch them if missing) so the initial
-            # commit has something to track.
+            # 确保 tracked_files 作为空文件存在，这样首次 commit 有内容可提交
             for rel in self._tracked_files:
                 p = self._workspace / rel
                 p.parent.mkdir(parents=True, exist_ok=True)
                 if not p.exists():
                     p.write_text("", encoding="utf-8")
 
-            # Initial commit
+            # 初始提交
             porcelain.add(str(self._workspace), paths=[".gitignore"] + self._tracked_files)
             porcelain.commit(
                 str(self._workspace),
@@ -119,9 +258,28 @@ class GitStore:
     # -- daily operations ------------------------------------------------------
 
     def auto_commit(self, message: str) -> str | None:
-        """Stage tracked memory files and commit if there are changes.
+        """自动提交：stage tracked files 并在有变更时 commit。
 
-        Returns the short commit SHA, or None if nothing to commit.
+        【中文名称】自动提交
+
+        【功能说明】
+        这是 GitStore 中最常用的操作。每次记忆文件变更后（Dream consolidation、
+        手动编辑等），由调用方自动触发一次提交，保证历史可以追溯。
+
+        【完整流程】
+        1. 检查仓库是否初始化（未初始化跳过）
+        2. git status 查看是否有变更
+        3. 没有变更 → 返回 None（不创建空提交）
+        4. 有变更 → git add 所有 tracked_files
+        5. git commit 写入 "nanobot <nanobot@dream>" 身份
+        6. 返回短 SHA（hex[:8]）
+
+        【参数说明】
+        - message: 提交信息，例如 "Dream consolidation" 或 "edit SOUL.md"
+
+        【返回值】
+        - str: 新提交的短 SHA（8 位十六进制）
+        - None: 无变更可提交 / 仓库未初始化 / 执行异常
         """
         if not self.is_initialized():
             return None
@@ -129,8 +287,7 @@ class GitStore:
         try:
             from dulwich import porcelain
 
-            # .gitignore excludes everything except tracked files,
-            # so any staged/unstaged change must be in our files.
+            # .gitignore 采用白名单策略，所以任何变更都来自 tracked_files
             st = porcelain.status(str(self._workspace))
             if not st.unstaged and not any(st.staged.values()):
                 return None
@@ -155,7 +312,21 @@ class GitStore:
     # -- internal helpers ------------------------------------------------------
 
     def _resolve_sha(self, short_sha: str) -> bytes | None:
-        """Resolve a short SHA prefix to the full SHA bytes."""
+        """把短 SHA（如 "abc12345"）解析为完整的 40 位 SHA bytes。
+
+        【中文名称】解析短 SHA
+
+        【查找策略】
+        从 HEAD 开始沿 parent 链向下 walk，直到找到 sha.hex() 以 short_sha 开头的 commit。
+        这是一个 O(N) 的线性查找，N 受限于仓库 commit 数量。
+
+        【参数说明】
+        - short_sha: 至少 1 位的短 SHA 前缀（通常来自用户输入或前端展示）
+
+        【返回值】
+        - bytes: 完整的 40 位 SHA
+        - None: 短 SHA 没匹配到任何 commit
+        """
         try:
             from dulwich.repo import Repo
 
@@ -177,13 +348,17 @@ class GitStore:
             return None
 
     def _is_inside_git_repo(self) -> bool:
-        """Check if self._workspace is already inside a git repository.
+        """检查 workspace 是否已经嵌套在另一个 Git 仓库中。
 
-        Walks up from self._workspace to the filesystem root, returning True
-        if any parent directory contains a .git entry.
+        【中文名称】检查嵌套 Git 仓库
 
-        Git worktrees and submodules can use a ``.git`` file instead of a
-        directory, so we must treat either form as "already inside a repo".
+        【检查逻辑】
+        从 self._workspace 向上遍历到文件系统根目录，
+        如果任何父目录包含 .git（文件或目录），则认为已处于 Git 仓库内。
+
+        【为什么支持 .git 文件】
+        Git worktree 和 submodule 使用 .git 文件（内容为 "gitdir: /path/to/.git"），
+        而非 .git 目录。两者都应被视为"已在仓库内"的标志。
         """
         current = self._workspace.resolve()
         while current != current.parent:
@@ -193,7 +368,28 @@ class GitStore:
         return False
 
     def _build_gitignore(self) -> str:
-        """Generate .gitignore content from tracked files."""
+        """生成白名单策略的 .gitignore 内容。
+
+        【中文名称】生成 .gitignore
+
+        【策略说明】
+        采用"先全部忽略，再逐项放行"的白名单策略：
+        - 第一行: "/*" — 忽略 workspace 下所有内容
+        - 中间行: "!父目录/" — 放行 tracked_files 所在的目录
+        - 核心行: "!tracked_file" — 逐项放行被跟踪的文件
+        - 最后: "!.gitignore" — 放行 .gitignore 自身（否则无法被提交）
+
+        【为什么用白名单而非黑名单】
+        如果采用黑名单（.gitignore 只写忽略项），用户新增文件会被自动纳入版本控制，
+        可能导致敏感数据意外提交。白名单确保"只有明确声明的文件才被跟踪"。
+
+        【示例输出（tracked_files = ["SOUL.md", "memory/MEMORY.md"]）】
+        /*
+        !memory/
+        !.gitignore
+        !SOUL.md
+        !memory/MEMORY.md
+        """
         dirs: set[str] = set()
         for f in self._tracked_files:
             parent = str(Path(f).parent)
@@ -210,7 +406,20 @@ class GitStore:
     # -- query -----------------------------------------------------------------
 
     def log(self, max_entries: int = 20) -> list[CommitInfo]:
-        """Return simplified commit log."""
+        """返回最近 N 条提交记录摘要。
+
+        【中文名称】查看提交历史
+
+        【实现方式】
+        从 HEAD 开始沿 parent 链 walk，最多返回 max_entries 条记录。
+
+        【参数说明】
+        - max_entries: 最多返回多少条记录（默认 20）
+
+        【返回值】
+        - [CommitInfo, ...]: 最近提交列表，按时间降序（最新在前）
+        - []: 仓库未初始化 / 无 HEAD / 读取异常
+        """
         if not self.is_initialized():
             return []
 
@@ -247,11 +456,25 @@ class GitStore:
             return []
 
     def line_ages(self, file_path: str) -> list[LineAge]:
-        """Compute the age of each line in a tracked file via git blame.
+        """通过 git blame 计算指定文件每行代码的修改年龄。
 
-        Returns one LineAge per line, in order.
-        Returns an empty list if the repo is not initialized, the file is
-        empty, or annotation fails.
+        【中文名称】行年龄计算
+
+        【功能说明】
+        使用 git blame 追溯 tracked file 每一行的最后修改时间，
+        并将时间差转换为"距今多少天"。
+
+        【使用场景】
+        记忆系统（Dream consolidation）通过行龄判断：
+        - 年龄较大的行 → "冻结状态"，可以考虑压缩/归档
+        - 年龄较小的行 → "活跃状态"，保留详情
+
+        【参数说明】
+        - file_path: 相对于 workspace 的文件路径（如 "memory/MEMORY.md"）
+
+        【返回值】
+        - [LineAge, ...]: 与文件行数等长的年龄列表
+        - []: 仓库未初始化 / 文件不存在或为空 / annotate 失败
         """
 
         if not self.is_initialized():
@@ -275,7 +498,22 @@ class GitStore:
         return _compute_line_ages(annotated)
 
     def diff_commits(self, sha1: str, sha2: str) -> str:
-        """Show diff between two commits."""
+        """对比两次提交之间的 diff。
+
+        【中文名称】提交对比
+
+        【参数说明】
+        - sha1: 旧 commit 的短 SHA（作为 diff 基准）
+        - sha2: 新 commit 的短 SHA（与旧版本对比）
+
+        【返回值】
+        - str: 标准 diff 文本
+        - "": 仓库未初始化 / SHA 无法解析 / 读取异常
+
+        【使用场景】
+        - 用户想查看某次提交具体改了哪些行
+        - show_commit_diff() 内部调用，展示某次提交相对于父提交的变更
+        """
         if not self.is_initialized():
             return ""
 
@@ -300,14 +538,45 @@ class GitStore:
             return ""
 
     def find_commit(self, short_sha: str, max_entries: int = 20) -> CommitInfo | None:
-        """Find a commit by short SHA prefix match."""
+        """按短 SHA 前缀查找提交。
+
+        【中文名称】按 SHA 查找提交
+
+        【查找方式】
+        调用 log() 遍历最近 N 条 commit，逐一对比 sha 是否以 short_sha 开头。
+
+        【参数说明】
+        - short_sha: 短 SHA 前缀（如 "abc" 可匹配 abc12345）
+        - max_entries: 查找范围（默认最近 20 条）
+
+        【返回值】
+        - CommitInfo: 匹配成功
+        - None: 未找到
+        """
         for c in self.log(max_entries=max_entries):
             if c.sha.startswith(short_sha):
                 return c
         return None
 
     def show_commit_diff(self, short_sha: str, max_entries: int = 20) -> tuple[CommitInfo, str] | None:
-        """Find a commit and return it with its diff vs the parent."""
+        """查找提交并返回它相对于父提交的 diff。
+
+        【中文名称】显示提交变更
+
+        【功能说明】
+        这一步实际上做了两件事：
+        1. 在历史中找到目标 commit
+        2. 对该 commit 与它的父 commit 做 diff
+
+        【参数说明】
+        - short_sha: 目标提交的短 SHA
+        - max_entries: 查找范围
+
+        【返回值】
+        - (CommitInfo, diff_str): 成功找到并有父提交，diff_str 非空
+        - (CommitInfo, ""): 成功找到但无父提交（即这是根 commit）
+        - None: 未找到目标 commit
+        """
         commits = self.log(max_entries=max_entries)
         for i, c in enumerate(commits):
             if c.sha.startswith(short_sha):
@@ -321,12 +590,40 @@ class GitStore:
     # -- restore ---------------------------------------------------------------
 
     def revert(self, commit: str) -> str | None:
-        """Revert (undo) the changes introduced by the given commit.
+        """回滚（撤销）指定 commit 引入的变更。
 
-        Restores all tracked memory files to the state at the commit's parent,
-        then creates a new commit recording the revert.
+        【中文名称】版本还原
 
-        Returns the new commit SHA, or None on failure.
+        【功能说明】
+        将 tracked_files 恢复到目标 commit 的**父 commit** 状态，
+        然后创建一条新的 revert commit 记录这次回滚。
+
+        【完整流程（5 步）】
+
+        Step 1: 从短 SHA 解析完整 SHA → 解析失败返回 None
+
+        Step 2: 读取 commit 对象 → 不是 commit 类型返回 None
+
+        Step 3: 检查是否有父 commit
+           - 没有父 commit（即根 commit）→ 无法 revert，返回 None
+
+        Step 4: 遍历 tracked_files，读取父 commit tree 中对应 blob 的内容
+           - 把内容写回 workspace 对应文件
+           - 记录成功恢复的文件列表
+
+        Step 5: 自动提交 revert 记录
+           - commit 消息格式: "revert: undo <短SHA>"
+           - 返回新 commit 的短 SHA
+
+        【参数说明】
+        - commit: 要撤销的那个 commit 的短 SHA
+
+        【返回值】
+        - str: revert 操作创建的新 commit 的短 SHA
+        - None: commit 不存在 / 无可 revert 的父提交 / 读取或写入失败
+
+        【注意】
+        这个 revert 不是 `git revert`（反向应用 diff），而是直接恢复为父版本文件内容。
         """
         if not self.is_initialized():
             return None
@@ -348,7 +645,7 @@ class GitStore:
                     logger.warning("Git revert: cannot revert root commit {}", commit)
                     return None
 
-                # Use the parent's tree — this undoes the commit's changes
+                # 使用父 commit 的 tree，也就是"撤销"目标 commit 的变更
                 parent_obj = repo[commit_obj.parents[0]]
                 tree = repo[parent_obj.tree]
 
@@ -363,7 +660,7 @@ class GitStore:
             if not restored:
                 return None
 
-            # Commit the restored state
+            # 自动提交 revert 记录
             msg = f"revert: undo {commit}"
             return self.auto_commit(msg)
         except Exception:
@@ -372,7 +669,25 @@ class GitStore:
 
     @staticmethod
     def _read_blob_from_tree(repo, tree, filepath: str) -> str | None:
-        """Read a blob's content from a tree object by walking path parts."""
+        """从 tree 对象中读取指定文件路径的 blob 内容。
+
+        【中文名称】从 Git Tree 读取文件
+
+        【实现方式】
+        按路径段逐级 walk：
+        1. 从 tree 中查找第一段路径的 entry
+        2. 如果路径有多段，解析 entry 为 subtree 并递归
+        3. 最后一层找到 blob 后读取并解码为 UTF-8
+
+        【参数说明】
+        - repo: dulwich Repo 对象
+        - tree: dulwich Tree 对象（当前要查找的子目录）
+        - filepath: 相对于 repo 根目录的文件路径，如 "memory/MEMORY.md"
+
+        【返回值】
+        - str: 文件的文本内容
+        - None: 路径不存在 / 中间节点不是 tree / 最终节点不是 blob
+        """
         parts = Path(filepath).parts
         current = tree
         for part in parts:

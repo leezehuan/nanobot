@@ -102,7 +102,12 @@ class ConversationRef:
 
 
 class MSTeamsChannel(BaseChannel):
-    """Microsoft Teams channel (DM-first MVP)."""
+    """【中文名称】Microsoft Teams 渠道适配器
+
+    通过 Bot Framework SDK 接入 Microsoft Teams，当前为 DM-first 最小可行版本。
+    支持 Adaptive Card、消息扩展和 OAuth 认证。
+
+    Microsoft Teams channel (DM-first MVP)."""
 
     name = "msteams"
     display_name = "Microsoft Teams"

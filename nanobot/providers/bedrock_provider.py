@@ -53,7 +53,30 @@ def _next_or_none(iterator: Iterator[dict[str, Any]]) -> dict[str, Any] | None:
 
 
 class BedrockProvider(LLMProvider):
-    """基于 AWS Bedrock Runtime Converse API 的 LLM Provider。"""
+    """基于 AWS Bedrock Runtime Converse API 的 LLM Provider。
+
+    【中文名称】AWS Bedrock Provider
+
+    【功能说明】
+    通过 AWS Bedrock 的 Converse / ConverseStream API 调用托管模型。
+    与 AnthropicProvider 和 OpenAICompatProvider 的 key 区别是：
+    - 不走 HTTP API，而是走 boto3 SDK（需 AWS 凭据）
+    - 消息格式是 Bedrock 特有的 Converse 格式（类似 Anthropic 但有差异）
+    - 工具定义要包装在 toolSpec 里
+    - 图片块是 {"image": {"format": "jpeg", "source": {"bytes": ...}}} 格式
+
+    【处理流程】
+    1. _convert_messages：OpenAI 格式 → Bedrock Converse 格式
+    2. _build_kwargs：组装 Converse API 参数（含 thinking/extra_body）
+    3. chat / chat_stream：同步/流式调用入口，走 asyncio.to_thread（boto3 是同步客户端）
+    4. _parse_response / _parse_stream_event：解析响应
+
+    【关键兼容性处理】
+    - _merge_consecutive：合并连续同 role 消息（Bedrock 也有此要求）
+    - _noop_tool：当消息历史包含 toolUse 但当前请求没有 tools 时，
+      Bedrock 要求显式提供 tools 列表，所以插入一个占位 noop 工具
+    - thinking 配置：使用 adaptive thinking（由模型自己决定思考量）
+    """
 
     def __init__(
         self,
@@ -296,6 +319,27 @@ class BedrockProvider(LLMProvider):
         self,
         messages: list[dict[str, Any]],
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """把 nanobot 内部消息转换成 Bedrock Converse 格式。
+
+        【中文名称】消息格式转换
+
+        【功能说明】
+        将 OpenAI 风格的 nanobot 消息转换为 Bedrock Converse API 的
+        (system, messages) 格式。转换规则：
+
+        - system 消息：提取 content 中的 text 块，放入独立的 system 数组
+        - tool 消息：转成 toolResult block，附加到前一条 user 消息中
+        - assistant 消息：拆成 text + toolUse + reasoningContent 等 block
+        - user 消息：转换图片 URL 块为 Bedrock image block
+
+        最后通过 _merge_consecutive 合并连续同 role 消息。
+
+        【参数说明】
+        - messages: nanobot 内部消息列表
+
+        【返回值】
+        - (system_blocks, bedrock_messages) 元组
+        """
         system: list[dict[str, Any]] = []
         converted: list[dict[str, Any]] = []
 
@@ -702,6 +746,23 @@ class BedrockProvider(LLMProvider):
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
     ) -> LLMResponse:
+        """发送非流式对话请求到 Bedrock Converse API。
+
+        【中文名称】非流式对话
+
+        【功能说明】
+        通过 boto3 的 converse() 方法调用 Bedrock 模型。
+        由于 boto3 是同步客户端，使用 asyncio.to_thread 在线程池中执行以避免阻塞事件循环。
+
+        【流程】
+        1. _build_kwargs 组装参数（消息转换 + 工具转换 + thinking 配置）
+        2. asyncio.to_thread(self._client.converse, **kwargs)
+        3. _parse_response 解析响应
+        4. 异常由 _handle_error 统一转换为 LLMResponse
+
+        【返回值】
+        - LLMResponse → 统一格式的 LLM 响应
+        """
         try:
             kwargs = self._build_kwargs(
                 messages, tools, model, max_tokens, temperature, reasoning_effort, tool_choice
@@ -724,6 +785,37 @@ class BedrockProvider(LLMProvider):
         on_thinking_delta: Callable[[str], Awaitable[None]] | None = None,
         on_tool_call_delta: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> LLMResponse:
+        """发送流式对话请求到 Bedrock ConverseStream API。
+
+        【中文名称】流式对话
+
+        【功能说明】
+        通过 boto3 的 converse_stream() 方法进行流式调用。
+        与 chat() 的关键区别：
+
+        【Bedrock 流事件类型】
+        - contentBlockStart：工具调用开始的信号
+        - contentBlockDelta：文本增量 / 工具参数增量 / 推理文本增量
+        - contentBlockStop：一个 content block 结束（收集 reasoning signature）
+        - messageStop：消息流结束（含 stopReason）
+        - metadata：用量统计
+
+        【工作流程】
+        1. _build_kwargs 组装参数
+        2. asyncio.to_thread(self._client.converse_stream, **kwargs)
+        3. 循环消费迭代器中的事件：
+           - 每个事件由 _parse_stream_event 解析
+           - 文本增量通过 on_content_delta 回调
+        4. 流结束：_stream_result 合并所有缓冲区 → LLMResponse
+        5. 空闲超时：NANOBOT_STREAM_IDLE_TIMEOUT_S 控制（默认 90s）
+
+        【注意】
+        Bedrock 的流式目前无法 emit 实时的 tool_call / thinking delta
+        （boto3 的 ConverseStream API 不产生单字符粒度的 toolUse 流事件）。
+
+        【返回值】
+        - LLMResponse → 统一格式的 LLM 响应
+        """
         _ = on_thinking_delta, on_tool_call_delta
         idle_timeout_s = int(os.environ.get("NANOBOT_STREAM_IDLE_TIMEOUT_S", "90"))
         content_parts: list[str] = []

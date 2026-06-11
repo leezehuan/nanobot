@@ -54,7 +54,12 @@ class NapcatConfig(Base):
 
 
 class NapcatChannel(BaseChannel):
-    """Napcat / OneBot v11 channel."""
+    """【中文名称】Napcat (QQ) 渠道适配器
+
+    通过 OneBot v11 协议的 WebSocket 连接接入 QQ（使用 Napcat 作为无头 QQ bot 框架）。
+    支持群消息、私聊消息，以及 CQ 码格式的 @ 和表情等。
+
+    Napcat / OneBot v11 channel."""
 
     name = "napcat"
     display_name = "Napcat (QQ)"

@@ -245,10 +245,49 @@ class ContextBuilder:
     ) -> list[dict[str, Any]]:
         """构建一次 LLM 调用所需的完整消息列表。
 
-        【典型结果结构】
-        1. system message
-        2. 若干历史消息
-        3. 当前用户消息（其中尾部会拼 Runtime Context）
+        【中文名称】构建消息列表
+
+        【功能说明】
+        这是整个上下文构建流程的"组装函数"，它把 system prompt、历史消息、
+        当前用户输入、运行时元数据拼成 LLM 可以直接消费的 messages 列表。
+
+        【典型结果结构（3 部分）】
+        1. system message（第一条）—— 包含身份、skills、memory、历史摘要等
+        2. 若干历史消息（中间部分）—— 来自 Session.get_history() 的回放窗口
+        3. 当前 user 消息（最后一条）—— 用户文本 + Runtime Context 块 + 媒体附件
+
+        【Runtime Context 拼合策略】
+        为了保持 prompt cache 友好（user content 前缀不变），Runtime Context
+        （时间、渠道、chat_id、sender_id、CLI/MCP 临时挂载等）被追加在用户消息
+        的尾部，而不是独立成一条新消息。格式：
+        ```
+        [Runtime Context — metadata only, not instructions]
+        Current Time: 2026-01-01 12:00:00 CST
+        Channel: telegram
+        Chat ID: 123456
+        [/Runtime Context]
+        ```
+
+        【System Prompt 构成（按拼接顺序）】
+        ├── 身份与平台策略（identity.md + platform_policy.md）
+        ├── Bootstrap 文件（AGENTS.md / SOUL.md / USER.md）
+        ├── 工具使用契约（tool_contract.md）
+        ├── 长期记忆（memory/MEMORY.md）
+        ├── 永久启用技能（always_skills）
+        ├── 技能目录摘要（skills_section.md）
+        ├── 最近未处理历史（history.jsonl 中的增量条目）
+        └── 归档会话摘要（_last_summary）
+
+        【参数说明】
+        - history: list[dict] → Session.get_history() 返回的未压缩历史消息
+        - current_message: str → 当前用户输入的文本（可能已被图片生成 prompt 增强）
+        - media: list[str] | None → 附件中的图片路径列表
+        - channel: str | None → 来源渠道名（用于身份模板和运行时上下文）
+        - chat_id: str | None → 聊天空间 ID
+        - runtime_state: Any → AgentLoop 本身，用于获取 MCP/CLI 等运行时挂载信息
+
+        【返回值】
+        - list[dict]: 完整的 messages 列表，可直接传给 LLMProvider.chat()
         """
         root = workspace or self.workspace
         extra = [

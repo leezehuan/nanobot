@@ -1,9 +1,41 @@
 """媒体解码工具：把 ``data:...;base64,...`` URL 保存成真实文件。
 
+【中文名称】Base64 媒体解码器
+
+【功能说明】
 这个模块被 API server 与 WebSocket 渠道共享，保证不同入口都使用同一套：
 - data URL 解析规则
 - 文件大小限制
 - 文件落盘命名方式
+
+【完整的解码流程（5 阶段）】
+
+Phase 1: 正则匹配 data URL 格式
+   - 模式: data:<mime>[;params]*;base64,<payload>
+   - 匹配失败 → 返回 None
+
+Phase 2: Base64 解码
+   - 使用标准 base64.b64decode
+   - 解码失败 → 返回 None
+
+Phase 3: 文件大小检查
+   - 默认上限 10MB（DEFAULT_MAX_BYTES）
+   - 超限 → 抛出 FileSizeExceededError
+
+Phase 4: 确定文件扩展名
+   - 优先查 MIME_EXTENSION_OVERRIDES 表（修复 Python mimetypes 返回冷门后缀的问题）
+   - 其次用 mimetypes.guess_extension
+   - 兜底 ".bin"
+
+Phase 5: 写入文件
+   - 文件名: uuid.hex[:12] + ext
+   - 目标路径: media_dir / safe_filename(file_name)
+   - 返回绝对路径字符串
+
+【安全防护】
+- safe_filename() 过滤路径非法字符（< > : " / \\ | ? *）
+- uuid 命名避免文件名冲突
+- 返回绝对路径方便调用方直接使用
 """
 
 from __future__ import annotations
@@ -50,10 +82,20 @@ def save_base64_data_url(
 ) -> str | None:
     """解码 ``data:<mime>;base64,<payload>`` URL，并把结果写入磁盘。
 
-    返回：
-    - 成功：保存后的绝对路径
-    - URL 形状或 base64 内容非法：``None``
-    - 超过大小限制：抛 ``FileSizeExceeded``
+    【中文名称】保存 Base64 Data URL 到磁盘
+
+    【参数说明】
+    - data_url: 完整的 data URL 字符串，
+      格式为 ``data:audio/ogg;codecs=opus;base64,T2dnUw...``
+    - media_dir: 目标目录（图片存到 media/images/，音频存到 media/audio/ 等）
+    - max_bytes: 可选的文件大小上限（字节），默认 10MB
+
+    【返回值】
+    - str: 保存后的绝对文件路径（成功）
+    - None: data URL 格式非法或 base64 解码失败
+
+    【异常】
+    - FileSizeExceededError: 解码后二进制超过大小限制
     """
     m = _DATA_URL_RE.match(data_url)
     if not m:

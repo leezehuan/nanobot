@@ -292,7 +292,47 @@ class ChannelManager:
         return False
 
     async def _dispatch_outbound(self) -> None:
-        """持续消费出站队列，并把消息路由到对应渠道。"""
+        """持续消费出站队列，并把消息路由到对应渠道。
+
+        【中文名称】出站消息分发器
+
+        【功能说明】
+        这是 ChannelManager 的"心跳协程"。它一边不断从 MessageBus.outbound
+        队列消费出站消息，一边根据消息类型和元数据标记做路由和去重。
+
+        【消息分类处理（按 metadata 标记）】
+        1. _reasoning_delta / _reasoning_end / _reasoning：
+           走独立的 reasoning 发送通道（send_reasoning_delta / send_reasoning_end）
+           只有目标渠道开启了 show_reasoning 才真正发送
+
+        2. _progress / _tool_hint：
+           根据渠道的 send_progress / send_tool_hints 开关决定是否发送
+
+        3. _retry_wait：
+           静默跳过（这只是重试等待心跳通知，不是用户可见消息）
+
+        4. _stream_delta（非 _stream_end）：
+           流式增量合并：用 _coalesce_stream_deltas() 把连续的流式 delta
+           合并成一条大消息再发送，减少渠道 API 调用次数
+
+        5. 普通消息：
+           先做重复抑制检查（_should_suppress_outbound），
+           再通过 _send_with_retry() （带指数退避重试）发送
+
+        【去重机制】
+        对同一 (channel, chat_id, origin_message_id) 组合，如果内容指纹相同，
+        则被视为重复消息并抑制发送。这主要防止某些场景下同一条回复被多次生成。
+
+        【重试策略】
+        _send_with_retry() 使用指数退避（1s → 2s → 4s），最多重试次数
+        由 channels.send_max_retries 配置（默认 3）。
+
+        【参数说明】
+        无 —— 这是常驻协程，通过 self.bus 拿到队列引用。
+
+        【返回值】
+        无 —— 这是一个常驻协程，进程退出时才会结束。
+        """
         logger.info("Outbound dispatcher started")
 
         # 因为 asyncio.Queue 没有 push_front，所以在流式合并过程中如果多拿了

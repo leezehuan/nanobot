@@ -1,7 +1,16 @@
-"""WebUI transcription envelope handling.
+"""WebUI 音频转写 WebSocket 事件处理器。
 
-The WebSocket channel owns transport and subscription fan-out. This module owns
-the WebUI-specific audio transcription action carried over that socket.
+【中文名称】语音转写事件入口
+
+WebSocket 通道本身只负责消息运输和广播分发，
+而“某个 envelope 表示一次语音转写请求”这层业务语义由本模块负责。
+
+也就是说，这里处理的是：
+
+- 解析前端发来的转写请求 envelope
+- 校验 request_id
+- 调用音频转写服务
+- 产出统一的成功/失败事件
 """
 
 from __future__ import annotations
@@ -19,7 +28,13 @@ _MAX_REQUEST_ID_LENGTH = 80
 
 
 async def webui_transcription_event(envelope: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    """Return the WS event name and payload for one WebUI transcription request."""
+    """处理一条 WebUI 转写请求，并返回 `(事件名, 事件载荷)`。
+
+    返回的事件名有两种：
+
+    - `transcription_result`
+    - `transcription_error`
+    """
     request_id = envelope.get("request_id")
     valid_request_id = (
         isinstance(request_id, str)
@@ -27,6 +42,7 @@ async def webui_transcription_event(envelope: dict[str, Any]) -> tuple[str, dict
     )
 
     def error(detail: str, **extra: Any) -> tuple[str, dict[str, Any]]:
+        """统一构造转写失败事件。"""
         payload: dict[str, Any] = {"detail": detail, **extra}
         if valid_request_id:
             payload["request_id"] = request_id

@@ -262,7 +262,56 @@ def _is_websocket_upgrade(request: WsRequest) -> bool:
 
 
 class WebSocketChannel(BaseChannel):
-    """Run a local WebSocket server; forward text/JSON messages to the message bus."""
+    """Run a local WebSocket server; forward text/JSON messages to the message bus.
+
+    【中文名称】WebSocket 渠道适配器
+
+    【功能说明】
+    这是 nanobot WebUI 与后端通信的核心通道。它在一个本地端口（默认 8765）
+    上运行 WebSocket 服务器，WebUI 前端通过它实现：
+    - 实时聊天：用户消息 → WS → MessageBus → AgentLoop → LLM → 流式返回
+    - 多会话管理：一个连接可以订阅多个 chat_id，支持多标签页同时使用
+    - 文件编辑进度：实时推送 write_file / edit_file 工具的增量变更
+    - 长期任务状态：sustained goal 的 goal_state 同步
+    - 运行时模型切换：runtime_model_updated 事件广播
+
+    【关键架构】
+    ┌─────────────┐     WebSocket      ┌──────────────────┐
+    │  React SPA   │ ◄──────────────► │  WebSocketChannel │
+    │  (WebUI)     │   JSON frames     │  (this class)    │
+    └─────────────┘                    └──────┬───────────┘
+                                              │ OutboundMessage
+                                        ┌─────▼──────┐
+                                        │ MessageBus  │
+                                        └─────┬──────┘
+                                              │
+                                        ┌─────▼──────┐
+                                        │ AgentLoop   │
+                                        └────────────┘
+
+    【入站消息类型（envelope dispatch）】
+    - "message"：用户聊天消息（文本 + 图片/视频 base64）
+    - "new_chat"：创建新会话
+    - "attach"：客户端订阅已有的 chat_id
+    - "fork_chat"：从已有会话分叉
+    - "set_workspace_scope"：设置工作区访问范围
+    - "transcribe_audio"：音频转写请求
+
+    【出站消息类型】
+    - "message"：Agent 回复文本
+    - "delta" / "stream_end"：流式增量 token
+    - "reasoning_delta" / "reasoning_end"：模型思考过程
+    - "file_edit"：文件编辑进度事件
+    - "turn_end"：回合结束信号（含 latency_ms）
+    - "goal_state" / "goal_status"：长期任务状态同步
+    - "session_updated"：会话范围变更通知
+    - "runtime_model_updated"：运行时模型切换通知
+
+    【连接鉴权】
+    - 静态 token：通过 config.token 配置
+    - 动态 token：通过 token_issue_path 端点签发（支持 Bearer 认证）
+    - websocket_requires_token：是否强制要求 token
+    """
 
     name = "websocket"
     display_name = "WebSocket"
@@ -423,6 +472,39 @@ class WebSocketChannel(BaseChannel):
     # -- Server lifecycle and connection ingress ---------------------------
 
     async def start(self) -> None:
+        """启动 WebSocket 服务器，进入监听循环。
+
+        【中文名称】启动 WebSocket 服务器
+
+        【功能说明】
+        这是 WebSocket 渠道的完整启动流程：
+
+        【启动流程 —— 5 个阶段】
+        Phase 1 —— 构建 SSL 上下文：
+          如果配置了 ssl_certfile + ssl_keyfile，创建 TLS 1.2+ 的 SSLContext，
+          支持 wss:// 加密连接
+
+        Phase 2 —— 注册 process_request 回调：
+          所有 HTTP 请求（包括 WS 升级、token 签发、静态文件等）先进入
+          _dispatch_http() 统一分发；
+          - 是 WS 升级且路径匹配 → _authorize_websocket_handshake 做鉴权
+          - 其他请求 → 转给 gateway HTTP router 处理
+
+        Phase 3 —— 创建服务器：
+          - Unix socket 模式：unix_serve（仅限本机进程间通信，安全隔离）
+          - TCP 模式：serve（可配置 host:port，支持远程访问）
+          两种模式都支持 max_message_bytes / ping_interval / ping_timeout
+
+        Phase 4 —— 等待停止信号：
+          await self._stop_event.wait()，直到 stop() 方法被调用
+
+        Phase 5 —— 清理：
+          关闭服务器，等待所有连接优雅退出；
+          Unix socket 模式下删除 socket 文件
+
+        【参数说明】
+        无显式参数，所有配置从 self.config (WebSocketConfig) 读取。
+        """
         from nanobot.utils.logging_bridge import redirect_lib_logging
 
         redirect_lib_logging("websockets", level="WARNING")
@@ -508,6 +590,35 @@ class WebSocketChannel(BaseChannel):
         await self._server_task
 
     async def _connection_loop(self, connection: Any) -> None:
+        """单个 WebSocket 连接的主事件循环。
+
+        【中文名称】连接主循环
+
+        【功能说明】
+        每个 WebSocket 客户端连接都会进入这个循环。它负责该连接的完整生命周期：
+
+        【生命周期 —— 4 个阶段】
+        Phase 1 —— 握手与身份识别：
+          - 从 query string 中提取 client_id（未提供时生成匿名 ID）
+          - 生成 default_chat_id（UUID4），作为该连接默认的会话标识
+
+        Phase 2 —— 发送 ready 事件：
+          - 向客户端推送 {"event": "ready", "chat_id": "...", "client_id": "..."}
+          - 将 connection 注册到订阅表（_conn_default + _attach）
+          - 回放 active goal state（如果当前有长期任务在运行）
+
+        Phase 3 —— 消息循环：
+          - 循环接收 WebSocket frame
+          - 先尝试解析为新式 JSON envelope（带 type 字段，支持多会话路由）
+          - 如果不是 envelope，回退为纯文本消息（走 default_chat_id）
+          - 非 envelope 消息不需要配对（WebSocket 已在握手时鉴权）
+
+        Phase 4 —— 清理：
+          - 连接断开或异常时，从所有订阅表中移除该连接
+
+        【参数说明】
+        - connection: ServerConnection → websockets 库的连接对象
+        """
         request = connection.request
         path_part = request.path if request else "/"
         _, query = _parse_request_path(path_part)
@@ -644,7 +755,48 @@ class WebSocketChannel(BaseChannel):
         client_id: str,
         envelope: dict[str, Any],
     ) -> None:
-        """Route one typed inbound envelope (``new_chat`` / ``attach`` / ``message``)."""
+        """分发一条带 type 字段的 JSON envelope 到对应处理逻辑。
+
+        【中文名称】Envelope 分发器
+
+        【功能说明】
+        WebSocket 的新式消息协议：所有结构化消息都带 type 字段，不同 type
+        走不同的处理分支。相比纯文本消息，envelope 能承载更丰富的语义。
+
+        【支持的 type 及处理逻辑】
+
+        "new_chat" —— 创建新会话：
+          1. 生成新的 UUID chat_id
+          2. 检查并设置 workspace scope（文件系统访问权限）
+          3. 发送 attached + session_updated 事件
+          4. 回放 goal state
+
+        "fork_chat" —— 分叉会话：
+          委托 handle_webui_fork_chat 处理，从已有会话复制上下文
+
+        "attach" —— 订阅已有会话：
+          1. 校验 chat_id 格式
+          2. 将 connection 订阅到该 chat_id
+          3. 回放 goal state
+
+        "set_workspace_scope" —— 设置工作区范围：
+          在 agent 空闲时修改该会话能访问的文件系统路径
+
+        "transcribe_audio" —— 音频转写：
+          委托 webui_transcription_event 处理
+
+        "message" —— 用户消息（最常用）：
+          1. 校验 chat_id 和 content
+          2. 解析 media 字段（base64 图片/视频），落盘到本地
+          3. 提取 workspace scope、image_generation 参数、cli_apps、mcp_presets
+          4. 写入 WebUI 转录（用于前端回放）
+          5. 通过 self._handle_message 发送到 MessageBus
+
+        【参数说明】
+        - connection: ServerConnection → 客户端连接对象
+        - client_id: str → 客户端标识符
+        - envelope: dict → JSON 消息体，必须包含 type 字段
+        """
         t = envelope.get("type")
         if t == "new_chat":
             new_id = str(uuid.uuid4())
@@ -847,6 +999,38 @@ class WebSocketChannel(BaseChannel):
             raise
 
     async def send(self, msg: OutboundMessage) -> None:
+        """通过 WebSocket 向订阅的客户端发送一条消息。
+
+        【中文名称】发送出站消息
+
+        【功能说明】
+        这是 ChannelManager 分发 OutboundMessage 到 WebSocket 客户端的入口。
+        与 Telegram 的 send() 不同，WebSocket 的 send 需要处理更丰富的事件类型：
+
+        【事件分发 —— 7 种类型】
+        _runtime_model_updated → send_runtime_model_updated（模型切换）
+        _goal_state_sync → send_goal_state（长期任务状态同步）
+        _goal_status → send_goal_status（任务运行状态）
+        _turn_end → send_turn_end（回合结束，含 latency + goal_state）
+        _session_updated → send_session_updated（工作区范围变更）
+        _file_edit_events → send_file_edit_events（文件编辑进度）
+        普通消息 → 构造 JSON payload 并群发给所有订阅者
+
+        【普通消息的 JSON payload 结构】
+        {
+          "event": "message",
+          "chat_id": "...",
+          "text": "...",           // 文本内容（media URLs 已重写）
+          "media_urls": [...],     // 签名后的媒体文件 URL
+          "tool_events": [...],    // 工具调用事件
+          "agent_ui": {...},       // Agent UI 组件数据
+          "kind": "tool_hint" | "progress",  // 消息类型标记
+          "latency_ms": 1234       // 延迟
+        }
+
+        【参数说明】
+        - msg: OutboundMessage → 从 MessageBus 分发的出站消息
+        """
         if msg.metadata.get("_runtime_model_updated"):
             await self.send_runtime_model_updated(
                 model_name=msg.metadata.get("model"),
@@ -1053,6 +1237,25 @@ class WebSocketChannel(BaseChannel):
         delta: str,
         metadata: dict[str, Any] | None = None,
     ) -> None:
+        """向 WebSocket 客户端推送流式增量文本。
+
+        【中文名称】流式增量发送
+
+        【功能说明】
+        与 Telegram 的 send_delta 对应，但 WebSocket 不需要编辑已有消息——
+        客户端自行组装增量文本。工作方式：
+
+        【流程】
+        1. 非 _stream_end：发送 "delta" 事件，将 delta 追加到内存缓冲区
+        2. _stream_end：发送 "stream_end" 事件，拼接缓冲区中的所有 delta，
+           通过 _media.rewrite_local_markdown_images 重写图片 URL，
+           把最终文本一起发给客户端
+
+        【参数说明】
+        - chat_id: str → 会话 ID
+        - delta: str → 增量文本片段
+        - metadata: dict → 包含 _stream_id（不同流标识）、_stream_end（流结束标记）
+        """
         conns = list(self._subs.get(chat_id, ()))
         meta = metadata or {}
         stream_key = (chat_id, str(meta.get("_stream_id") or ""))

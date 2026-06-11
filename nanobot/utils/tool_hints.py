@@ -1,9 +1,21 @@
 """工具提示格式化：把 tool call 压缩成人类容易扫读的短提示。
 
-例如把：
-``read_file(path='D:/Project/nanobot/very/long/path/foo.py')``
-压缩成更适合进度条或聊天气泡展示的：
-``read …/foo.py``
+【中文名称】工具调用提示格式化
+
+【功能说明】
+在进度条、聊天气泡、状态提示等需要展示"Agent 正在做什么"的场景中，
+原始 tool call JSON（如 {"name": "read_file", "arguments": {"path": "D:/very/long/path/foo.py"}}）
+太长且不友好。本模块负责将其压缩为人类可读的短文本（如 "read …/foo.py"）。
+
+【压缩策略】
+1. 已知工具用注册表渲染：每个工具注册了"优先参数"和"渲染模板"
+2. MCP 工具按 "server::tool" 格式展示
+3. 未知工具用兜底逻辑：取第一个参数值作为展示文本
+4. 连续重复的相同提示会折叠成 "× N" 形式
+
+【注册表示例】
+read_file → 优先取 path/file_path 参数 → 渲染为 "read …/foo.py"
+exec     → 优先取 command 参数 → 缩写命令中嵌入的路径 → 渲染为 "$ ..."
 """
 
 from __future__ import annotations
@@ -36,11 +48,34 @@ _PATH_IN_CMD_RE = re.compile(
 
 
 def format_tool_hints(tool_calls: list, max_length: int = 40) -> str:
-    """把一组 tool call 格式化成短提示字符串。
+    r"""把一组 tool call 格式化成短提示字符串。
 
-    额外做了两件体验优化：
-    - 对路径和命令做智能缩写
-    - 连续重复的相同提示会折叠成 ``× N`` 形式
+    【中文名称】格式化工具提示
+
+    【完整的 4 个阶段】
+
+    Phase 1: 逐个格式化 tool call
+      - 已知工具（在 _TOOL_FORMATS 注册表中）→ _fmt_known() 按模板渲染
+      - MCP 工具（以 "mcp_" 开头）→ _fmt_mcp() 格式化为 "server::tool"
+      - 未知工具 → _fmt_fallback() 取第一个参数值作为展示
+
+    Phase 2: 路径/命令缩写
+      - 被标记为 is_path 的工具参数 → abbreviate_path() 压缩长路径
+      - 被标记为 is_command 的工具参数 → _abbreviate_command() 压缩内嵌路径
+
+    Phase 3: 重复折叠
+      - 连续相同提示合并为 "hint × N"（例如 "search \"weather\" × 3"）
+
+    Phase 4: 拼接输出
+      - 多个提示用 ", " 连接输出
+
+    【参数说明】
+    - tool_calls: ToolCall 对象列表，每个对象应包含 name、arguments 属性
+    - max_length: 单个提示的最大字符数（默认 40）
+
+    【返回值】
+    - str: 逗号分隔的短提示字符串（例如 'read …/foo.py, search "weather"'）
+    - "": tool_calls 为空
     """
     if not tool_calls:
         return ""

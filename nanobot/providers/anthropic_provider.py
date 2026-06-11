@@ -33,6 +33,24 @@ def _gen_tool_id() -> str:
 class AnthropicProvider(LLMProvider):
     """LLM provider using the native Anthropic SDK for Claude models.
 
+    【中文名称】Anthropic Provider（Claude 原生适配器）
+
+    【功能说明】
+    这是与 OpenAI-compatible Provider 并列的另一条 Provider 通路。
+    不走 OpenAI 兼容层，而是直接按 Anthropic Messages API 的规则来：
+    - 消息格式转换（OpenAI chat 格式 → Anthropic Messages 格式）
+    - prompt 缓存控制（cache_control marker）
+    - 扩展思考（extended thinking）
+    - 工具调用与流式响应
+
+    【核心流程】
+    1. 构造函数：初始化 AsyncAnthropic 客户端，处理 base_url 规范化
+    2. _convert_messages：把 nanobot 内部消息转换成 Anthropic 格式
+    3. _merge_consecutive：规范化消息序列（合并连续同 role、去尾部 assistant 等）
+    4. _build_kwargs：组装 API 调用参数（含 thinking 预算、缓存标记）
+    5. chat / chat_stream：对外公开的同步/流式调用入口
+    6. _parse_response：把 Anthropic 响应解析成统一的 LLMResponse
+
     Handles message format conversion (OpenAI → Anthropic Messages API),
     prompt caching, extended thinking, tool calls, and streaming.
     """
@@ -71,6 +89,28 @@ class AnthropicProvider(LLMProvider):
 
     @classmethod
     def _handle_error(cls, e: Exception) -> LLMResponse:
+        """将 Anthropic SDK 异常转换为统一的 LLMResponse 错误格式。
+
+        【中文名称】错误处理
+
+        【功能说明】
+        这是异常 → 标准 LLMResponse 的转换枢纽。从 Anropic SDK 异常中提取：
+
+        1. HTTP 响应体 / headers → 错误消息和状态码
+        2. x-should-retry 头 → 是否应该重试
+        3. retry-after 头 → 重试等待秒数
+        4. 异常类名 → 错误类型（timeout / connection 等）
+        5. 错误载荷中的 type 和 code 字段
+
+        这样上层 AgentRunner 就能用统一逻辑处理所有 Provider 的异常，
+        而不需要关心具体是 Anthropic 还是 OpenAI。
+
+        【参数说明】
+        - e: Exception → Anthropic SDK 抛出的异常对象
+
+        【返回值】
+        - LLMResponse → 包含错误信息的 LLM 响应，finish_reason="error"
+        """
         response = getattr(e, "response", None)
         headers = getattr(response, "headers", None)
         payload = (
@@ -138,7 +178,30 @@ class AnthropicProvider(LLMProvider):
     def _convert_messages(
         self, messages: list[dict[str, Any]],
     ) -> tuple[str | list[dict[str, Any]], list[dict[str, Any]]]:
-        """把 nanobot 内部消息转换成 Anthropic 所需的 ``(system, messages)``。"""
+        """把 nanobot 内部消息转换成 Anthropic 所需的 ``(system, messages)``。
+
+        【中文名称】消息格式转换
+
+        【功能说明】
+        这是 Anthropic Provider 最核心的转换逻辑。OpenAI 和 Anthropic 的消息
+        格式差异很大，此函数承担了"格式翻译"的角色：
+
+        1. system 消息：从消息列表中抽出来，单独作为 system 参数（Anthropic 的
+           system 是独立的顶层参数，不混在 messages 数组里）
+        2. tool 消息：转换成 ``tool_result`` block，附加到前一条 user 消息上
+           （Anthropic 要求 tool_result 必须在 user 消息内）
+        3. assistant 消息：拆成 text + tool_use + thinking 等多个 content block
+        4. user 消息：转换图片 URL 块（OpenAI image_url → Anthropic image block）
+        5. 最后调用 _merge_consecutive 做序列规范化
+
+        【参数说明】
+        - messages: list[dict] → nanobot 内部消息列表（OpenAI chat 格式）
+
+        【返回值】
+        - (system, messages) 元组，可直接传入 Anthropic Messages API
+        - system 可能是 str 或 list（启用缓存控制时包装成 list）
+        - messages 是规范化后的 Anthropic 格式消息列表
+        """
         system: str | list[dict[str, Any]] = ""
         raw: list[dict[str, Any]] = []
 
@@ -283,6 +346,32 @@ class AnthropicProvider(LLMProvider):
     @staticmethod
     def _merge_consecutive(msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """把消息序列规范化成 Anthropic ``/messages`` 可接受的形式。
+
+        【中文名称】消息序列规范化
+
+        【功能说明】
+        Anthropic 对消息序列的要求比 OpenAI 更严格，此函数执行三条规则：
+
+        规则 1 —— 合并连续同 role 消息：
+          如果相邻两条消息的 role 相同（比如连续两条 user），就把它们的
+          content 合并成一条。Anthropic 要求 messages 数组严格交替 role。
+
+        规则 2 —— 去掉尾部 assistant 预填充：
+          对话不能以 assistant 结尾。如果尾部是 assistant 且不含 tool_use，
+          就把它转成 user 消息；如果只剩这一条 assistant 了，就转成 user 保留内容。
+
+        规则 3 —— 禁止 assistant 开头：
+          如果第一条是 assistant（且不含 tool_use），在前面补一条合成 user opener。
+
+        规则 2/3 的特殊处理：如果 assistant 消息里包含 tool_use block，说明
+        这是工具调用中间状态，不能随意转 role，否则会破坏 tool_use/tool_result
+        的语义绑定关系。
+
+        【参数说明】
+        - msgs: list[dict] → 已做格式转换但尚未规范化的消息列表
+
+        【返回值】
+        - list[dict] → 符合 Anthropic Messages API 角色交替规则的消息列表
 
         Anthropic 对消息序列的要求比 OpenAI 更严格：
 
@@ -429,6 +518,35 @@ class AnthropicProvider(LLMProvider):
         tool_choice: str | dict[str, Any] | None,
         supports_caching: bool = True,
     ) -> dict[str, Any]:
+        """组装一次完整的 Anthropic Messages API 调用参数。
+
+        【中文名称】构建 API 请求参数
+
+        【功能说明】
+        这是 ``chat()`` 和 ``chat_stream()`` 共享的参数组装逻辑，负责：
+
+        1. 模型名规范化：去掉 ``anthropic/`` 前缀，提取裸模型名
+        2. 消息格式转换：调用 _convert_messages 做 OpenAI→Anthropic 格式转换
+        3. 工具定义转换：把 OpenAI 风格的 function 定义转成 Anthropic input_schema
+        4. 缓存控制注入：在 system、倒数第 2 条消息、工具的尾部打上 cache_control marker
+        5. 扩展思考处理：
+           - "adaptive"：让模型自己决定思考量
+           - "low"/"medium"/"high"：映射为 1024/4096/8192+ token 的 thinking budget
+        6. 特殊模型兼容：claude-opus-4-7 不支持 temperature，必须省略
+
+        【参数说明】
+        - messages: 内部消息列表（OpenAI 格式）
+        - tools: 工具定义列表
+        - model: 模型名（可能带 anthropic/ 前缀）
+        - max_tokens: 最大输出 token
+        - temperature: 采样温度
+        - reasoning_effort: 推理力度（"low"/"medium"/"high"/"adaptive"/None）
+        - tool_choice: 工具选择策略
+        - supports_caching: 是否启用 prompt 缓存（默认 True）
+
+        【返回值】
+        - dict → 可直接解包传给 ``self._client.messages.create(**kwargs)`` 的参数字典
+        """
         model_name = self._strip_prefix(model or self.default_model)
         system, anthropic_msgs = self._convert_messages(self._sanitize_empty_content(messages))
         anthropic_tools = self._convert_tools(tools)
@@ -487,6 +605,32 @@ class AnthropicProvider(LLMProvider):
 
     @staticmethod
     def _parse_response(response: Any) -> LLMResponse:
+        """把 Anthropic SDK 的原始响应解析成统一的 LLMResponse。
+
+        【中文名称】响应解析
+
+        【功能说明】
+        遍历 Anthropic 响应的 content blocks，把不同类型的 block
+        分别提取为 text、tool_call、thinking_block：
+
+        - text block → content_parts 列表
+        - tool_use block → ToolCallRequest（含 id/name/arguments）
+        - thinking block → thinking_blocks 列表（保留 signature）
+
+        同时从 Anthropic 的 stop_reason 映射到统一的 finish_reason：
+        - "tool_use" → "tool_calls"
+        - "end_turn" → "stop"
+        - "max_tokens" → "length"
+
+        最后计算 token 用量统计，包含 prompt caching 的 cache_read 和
+        cache_creation 信息。
+
+        【参数说明】
+        - response: Anthropic SDK 返回的 Message 对象
+
+        【返回值】
+        - LLMResponse → 统一格式的 LLM 响应结构体，包含文本、工具调用、思考块和用量信息
+        """
         content_parts: list[str] = []
         tool_calls: list[ToolCallRequest] = []
         thinking_blocks: list[dict[str, Any]] = []
@@ -556,6 +700,31 @@ class AnthropicProvider(LLMProvider):
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
     ) -> LLMResponse:
+        """发送非流式对话请求到 Anthropic Messages API。
+
+        【中文名称】非流式对话
+
+        【功能说明】
+        这是 Anthropic Provider 的同步调用入口。一次完整的调用流程：
+
+        1. 调用 _build_kwargs 组装参数（消息转换、缓存注入、thinking 预算）
+        2. 通过 AsyncAnthropic SDK 发起 messages.create 调用
+        3. 如果遇到 "streaming is required" 异常（max_tokens + thinking 预算
+           超出服务端超时上限），自动降级走 chat_stream 重试
+        4. 调用 _parse_response 将原始响应解析为统一的 LLMResponse
+
+        【参数说明】
+        - messages: 消息历史列表（OpenAI chat 格式）
+        - tools: 工具定义列表（可选）
+        - model: 模型名（可选，默认使用 default_model）
+        - max_tokens: 最大输出 token 数（默认 4096）
+        - temperature: 采样温度（默认 0.7）
+        - reasoning_effort: 推理力度（None/"low"/"medium"/"high"/"adaptive"）
+        - tool_choice: 工具选择策略
+
+        【返回值】
+        - LLMResponse → 统一格式的 LLM 响应结构体
+        """
         kwargs = self._build_kwargs(
             messages, tools, model, max_tokens, temperature,
             reasoning_effort, tool_choice,
@@ -592,6 +761,42 @@ class AnthropicProvider(LLMProvider):
         on_thinking_delta: Callable[[str], Awaitable[None]] | None = None,
         on_tool_call_delta: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> LLMResponse:
+        """发送流式对话请求到 Anthropic Messages API。
+
+        【中文名称】流式对话
+
+        【功能说明】
+        这是 Anthropic Provider 的流式调用入口。与 chat() 不同，它会通过
+        SSE 事件流实时推送增量内容给上层。
+
+        完整的流式处理流程：
+        1. 调用 _build_kwargs 组装参数（同 chat()）
+        2. 通过 AsyncAnthropic SDK 发起 messages.stream 调用
+        3. 逐帧解析 SSE 事件流：
+           - content_block_start：检测 tool_use block 的开始，记录 call_id 和 name
+           - thinking_delta：发射增量 thinking 文本
+           - text_delta：发射增量回复文本
+           - input_json_delta：发射增量工具参数 JSON
+        4. 空闲超时保护：NANOBOT_STREAM_IDLE_TIMEOUT_S 环境变量控制（默认 90s）
+           关键：超时以"任何 SSE 事件"为活着的证据，而非仅文本 token。
+           这样模型长时间 thinking 时不会误判超时。
+        5. 流结束后调用 get_final_message 获取完整响应，再走 _parse_response 解析
+
+        【参数说明】
+        - messages: 消息历史列表（OpenAI chat 格式）
+        - tools: 工具定义列表（可选）
+        - model: 模型名（可选）
+        - max_tokens: 最大输出 token 数（默认 4096）
+        - temperature: 采样温度（默认 0.7）
+        - reasoning_effort: 推理力度
+        - tool_choice: 工具选择策略
+        - on_content_delta: 文本增量回调 → 每收到一段新文本就调用一次
+        - on_thinking_delta: 思考增量回调 → 每收到一段新 thinking 就调用一次
+        - on_tool_call_delta: 工具调用增量回调 → 收到工具参数 JSON 片段时调用
+
+        【返回值】
+        - LLMResponse → 统一格式的 LLM 响应结构体
+        """
         kwargs = self._build_kwargs(
             messages, tools, model, max_tokens, temperature,
             reasoning_effort, tool_choice,

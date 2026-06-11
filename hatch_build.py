@@ -1,21 +1,16 @@
-"""Hatch build hook that bundles the webui (Vite) into nanobot/web/dist.
+"""把 WebUI 构建产物打包进 Python wheel 的 Hatch 构建钩子。
 
-Triggered automatically by `python -m build` (and any other hatch-driven build)
-so published wheels and sdists ship a fresh webui without requiring developers
-to remember `cd webui && bun run build` beforehand.
+【中文名称】WebUI 构建钩子
 
-Behaviour:
+当执行 `python -m build` 这类基于 Hatch 的构建命令时，
+这个文件会自动决定是否需要先构建前端，再把产物放进
+`nanobot/web/dist`。
 
-- Skips for editable installs (`pip install -e .`). Editable mode is for Python
-  development; webui contributors use `cd webui && bun run dev` (Vite HMR) and
-  do not need a packaged `dist/`.
-- No-op when `webui/package.json` is absent (e.g. installing from an sdist that
-  already contains a prebuilt `nanobot/web/dist/`).
-- Skips when `NANOBOT_SKIP_WEBUI_BUILD=1` is set.
-- Skips when `nanobot/web/dist/index.html` already exists, unless
-  `NANOBOT_FORCE_WEBUI_BUILD=1` is set.
-- Uses `bun` when available, otherwise falls back to `npm`. The chosen tool
-  performs `install` followed by `run build`.
+它存在的意义是：
+
+1. 发布 wheel/sdist 时，确保前端静态文件是现成可用的；
+2. 避免开发者每次打包都手工记住 `cd webui && bun run build`；
+3. 对可编辑安装、预构建产物、显式跳过构建等场景做智能判断。
 """
 
 from __future__ import annotations
@@ -29,18 +24,23 @@ from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 
 
 class WebUIBuildHook(BuildHookInterface):
+    """Hatch 在打包阶段调用的 WebUI 构建钩子实现。"""
     PLUGIN_NAME = "webui-build"
 
     def initialize(self, version: str, build_data: dict) -> None:  # noqa: D401
+        """在构建开始前决定是否执行 WebUI 安装与打包。
+
+        这里的控制逻辑比较关键，因为前端构建通常比 Python 打包慢得多。
+        所以它会优先判断“能不能跳过”，只有确实需要时才执行安装和 build。
+        """
         root = Path(self.root)
         webui_dir = root / "webui"
         package_json = webui_dir / "package.json"
         dist_dir = root / "nanobot" / "web" / "dist"
         index_html = dist_dir / "index.html"
 
-        # `pip install -e .` builds an editable wheel; skip the (slow) webui
-        # bundle since editable installs target Python development and webui
-        # work uses `bun run dev` instead.
+        # `pip install -e .` 面向本地 Python 开发，通常不需要额外打包静态前端。
+        # WebUI 开发者会直接跑 `bun run dev`，所以这里主动跳过耗时构建。
         if self.target_name == "wheel" and version == "editable":
             self.app.display_info(
                 "[webui-build] skipped for editable install "
@@ -86,12 +86,14 @@ class WebUIBuildHook(BuildHookInterface):
 
     @staticmethod
     def _pick_runner() -> str | None:
+        """优先选择 bun，没有时退回 npm。"""
         for candidate in ("bun", "npm"):
             if shutil.which(candidate):
                 return candidate
         return None
 
     def _run(self, cmd: list[str], *, cwd: Path) -> None:
+        """执行一条构建命令，并把失败包装成更清晰的构建错误。"""
         self.app.display_info(f"[webui-build] $ {' '.join(cmd)} (cwd={cwd})")
         try:
             subprocess.run(cmd, cwd=cwd, check=True)

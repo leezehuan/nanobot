@@ -1,5 +1,29 @@
 """语音转写 Provider 适配层。
 
+【中文名称】语音转写适配层
+
+【功能说明】
+这个模块封装了 6 种语音转写 API 的调用细节，所有 provider 都通过
+统一的 ``transcribe(file_path) -> str`` 接口对外提供服务：
+
+1. OpenAI Whisper：标准的 ``/audio/transcriptions`` multipart 上传
+2. Groq Whisper：与 OpenAI 兼容，但独立管理 API key 和 base URL
+3. OpenRouter Whisper：走 JSON body 格式（base64 音频），非 multipart
+4. Xiaomi MiMo ASR：chat-completions 风格的 ASR 接口
+5. StepFun ASR：Server-Sent Events (SSE) 流式转写
+6. AssemblyAI：异步模式——上传 → 轮询 → 获取结果
+
+【重试策略】
+所有请求都通过 _post_with_retry 或 _request_json_with_retry 包装，
+处理以下瞬时故障：
+- 网络异常：TimeoutException / ConnectError / ReadError 等
+- HTTP 状态码：408 / 429 / 500 / 502 / 503 / 504
+- 最多重试 3 次，指数退避：1s → 2s → 4s
+
+【架构位置】
+channel 适配器（如 telegram.py）收到语音消息后，调用 base.py 的
+transcribe_audio 方法，后者再根据配置匹配对应的 provider 类来执行转写。
+
 这个模块只负责“怎么调用外部转写 API”，例如：
 
 - OpenAI Whisper
@@ -432,6 +456,29 @@ async def _post_with_retry(
     provider_label: str,
     extract_text: Callable[[dict[str, Any]], str],
 ) -> str:
+    """带重试的通用 HTTP POST 转写请求包装器。
+
+    【中文名称】转写请求（带重试）
+
+    【功能说明】
+    所有转写 provider 共享的重试逻辑层。build_request 返回参数字典后，
+    用 httpx 发送请求，在以下情况重试（最多 3 次+1 次初始尝试，指数退避）：
+
+    1. 网络异常（TimeoutException / ConnectError / ReadError 等）
+    2. 可重试 HTTP 状态码（408 / 429 / 500 / 502 / 503 / 504）
+    3. 非重试错误（401 / 403 / 400 等）直接返回 ""，不做无用重试
+
+    成功后通过 extract_text 回调从 payload 中提取转写文本。
+
+    【参数说明】
+    - build_request: () -> dict → 每次重试都重新调用以构建请求参数
+      （因为 httpx.AsyncClient 可能连接过期）
+    - provider_label: str → provider 名称（用于日志前缀）
+    - extract_text: dict -> str → 从 payload 中提取纯文本的回调
+
+    【返回值】
+    - str → 转写文本，失败时返回空字符串
+    """
     async with httpx.AsyncClient() as client:
         for attempt in range(_MAX_RETRIES + 1):
             try:

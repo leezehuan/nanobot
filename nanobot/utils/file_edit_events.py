@@ -1,4 +1,23 @@
-"""File-edit activity helpers for WebUI progress events."""
+"""File-edit activity helpers for WebUI progress events.
+
+【中文名称】文件编辑事件工具
+
+【功能说明】
+当 Agent 调用 write_file / edit_file / apply_patch 这三个工具时，
+WebUI 需要实时展示文件变化进度。这个模块提供了从"工具调用前后"快照
+构造 WebUI 展示事件的完整链路：
+
+【核心数据流】
+工具调用开始 → prepare_file_edit_trackers (快照) → build_file_edit_start_event
+            → 工具执行中 → StreamingFileEditTracker (流式增量事件)
+            → 工具执行完 → build_file_edit_end_event (精确 diff)
+
+【三个关键类】
+- FileSnapshot: 文件快照（路径、是否存在、内容、是否二进制/超大）
+- FileEditTracker: 跟踪一次文件编辑的状态（前后的 FileSnapshot）
+- StreamingFileEditTracker: 在模型还在流式生成工具参数时，就提前
+  解析 JSON 片段，预测文件变化量，发射"进行中"的 live 事件
+"""
 
 from __future__ import annotations
 
@@ -170,6 +189,33 @@ def prepare_file_edit_trackers(
     workspace: Path | None,
     params: dict[str, Any] | None,
 ) -> list[FileEditTracker]:
+    """为一组文件编辑工具调用创建 FileEditTracker 列表。
+
+    【中文名称】准备文件编辑跟踪器
+
+    【功能说明】
+    在工具执行前调用，为每个目标文件拍"before"快照。
+    后续工具执行完成后，用"after"快照与"before"快照做 diff，
+    计算出增删行数，发送给 WebUI 展示。
+
+    【处理流程】
+    1. 校验工具名是否在 TRACKED_FILE_EDIT_TOOLS（write_file/edit_file/apply_patch）中
+    2. 解析工具参数中的文件路径：
+       - write_file / edit_file：提取 params["path"]
+       - apply_patch：遍历 params["edits"] 中每个 edit 的 path
+    3. 对每个路径做去重（同一路径只拍一次快照）
+    4. 调用 read_file_snapshot 读取"before"状态
+
+    【参数说明】
+    - call_id: str → 工具调用的唯一 ID（用于关联 start/end/delta 事件）
+    - tool_name: str → 工具名（"write_file" / "edit_file" / "apply_patch"）
+    - tool: Any → 工具对象（可能提供 _resolve 方法做路径解析）
+    - workspace: Path | None → 工作区根目录（用于相对路径解析和展示）
+    - params: dict | None → 工具调用的参数字典
+
+    【返回值】
+    - list[FileEditTracker] → 每个目标文件一个 tracker
+    """
     if not is_file_edit_tool(tool_name):
         return []
     paths = resolve_file_edit_paths(tool_name, tool, workspace, params)
@@ -260,6 +306,22 @@ def build_file_edit_start_event(
     tracker: FileEditTracker,
     params: dict[str, Any] | None,
 ) -> dict[str, Any]:
+    """构建"文件编辑开始"事件，用于 WebUI 实时展示。
+
+    【中文名称】构建文件编辑开始事件
+
+    【功能说明】
+    在工具开始执行时调用。此时工具参数已完整，可以从 params 中"预测"
+    执行后的文件内容（_predict_after_text），与 before 快照做 diff，
+    得到一个 approximate（近似）的行数变化统计。
+
+    【参数说明】
+    - tracker: FileEditTracker → 包含 before 快照的跟踪器
+    - params: dict | None → 工具调用参数
+
+    【返回值】
+    - dict → {"version": 1, "call_id": "...", "phase": "start", "status": "editing", ...}
+    """
     predicted_after = _predict_after_text(tracker.tool, params or {}, tracker.before)
     if tracker.before.countable and predicted_after is not None:
         added, deleted = line_diff_stats(tracker.before.text, predicted_after)
@@ -279,6 +341,23 @@ def build_file_edit_end_event(
     tracker: FileEditTracker,
     params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """构建"文件编辑完成"事件，基于真实的 after 快照计算精确 diff。
+
+    【中文名称】构建文件编辑完成事件
+
+    【功能说明】
+    在工具执行完成后调用。重新读取文件内容（after 快照），
+    与 start 时的 before 快照做精确 diff，得到 final（非近似）的增删统计。
+
+    如果文件是 binary / 超大 / 不可读，则回退到 params 预测。
+
+    【参数说明】
+    - tracker: FileEditTracker → 已记录 before 快照的跟踪器
+    - params: dict | None → 工具调用参数（用于 binary/超大文件时的回退预测）
+
+    【返回值】
+    - dict → {"version": 1, "call_id": "...", "phase": "end", "status": "done", ...}
+    """
     after = read_file_snapshot(tracker.path)
     counted = False
     if tracker.before.countable and after.countable:
@@ -363,6 +442,33 @@ def build_file_edit_pending_event(
 
 class StreamingFileEditTracker:
     """Track file-edit tool arguments while the model is still streaming them.
+
+    【中文名称】流式文件编辑跟踪器
+
+    【功能说明】
+    这是实现"文件编辑实时预览"的核心类。问题在于：
+    - 工具执行要等模型把整个 tool_calls 参数流式输出完才开始
+    - 但对于 write_file 工具，模型的 content 参数可能非常大（几万行）
+    - 在流式生成这几万行的同时，WebUI 那边是"白屏等待"状态
+
+    这个类在模型还在流式输出工具参数的 JSON 时，**实时解析不完整的参数片段**：
+
+    【工作原理 —— 增量解析流式 JSON】
+    1. 每收到一个 arguments_delta 就追加到内存中的 arguments 字符串
+    2. 用状态机扫描不完整的 JSON 字符串中的字符串字段：
+       - "content"（write_file 的内容）
+       - "old_text" / "new_text"（edit_file 的替换文本）
+    3. 从这些字段中实时统计行数变化（added / deleted）
+    4. 按固定间隔（_LIVE_EMIT_INTERVAL_S = 0.18s）或达到行数阈值
+       （_LIVE_EMIT_LINE_STEP = 24 行）时，发射 "file_edit" 进度事件
+    5. 对于 apply_patch，还额外解析每段 patch 的 action 字段来区分
+       replace / add 操作
+
+    【关键状态管理】
+    - update(): 每次收到 tool_call_delta 回调时调用，增量更新参数
+    - flush(): 流结束后把最后一次变化推送出去
+    - apply_final_call_ids(): 把流式期间的占位 call_id 写回正式的 tool_call.id
+    - error_unmatched(): 标记未匹配到最终 tool_call 的编辑为错误
 
     Tool execution events only begin after the provider has completed the full
     function call.  For large ``write_file`` calls, the long wait is usually the

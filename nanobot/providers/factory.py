@@ -163,8 +163,35 @@ def make_provider(
 ) -> LLMProvider:
     """创建最终对外可用的 Provider。
 
-    如果配置了 fallback_models，这里返回的可能不是单个 provider，
-    而是包了一层 ``FallbackProvider`` 的组合对象。
+    【中文名称】创建 Provider 实例
+
+    【功能说明】
+    这是 Provider 层的核心工厂函数。它把配置对象中的 provider 信息
+    真正转成一个可用的 LLMProvider 实例。
+
+    【创建流程（3 步）】
+    1. 解析模型预设 → 确定用哪个 model + provider 组合
+    2. 根据 backend 类型实例化具体 Provider：
+       - "openai_compat" → OpenAICompatProvider（大部分 provider 走这个）
+       - "anthropic" → AnthropicProvider
+       - "azure_openai" → AzureOpenAIProvider
+       - "bedrock" → BedrockProvider
+       - "openai_codex" → OpenAICodexProvider
+       - "github_copilot" → GitHubCopilotProvider
+    3. 如果配置了 fallback_models → 包一层 FallbackProvider 链
+
+    【FallbackProvider 链的作用】
+    当主模型调用失败时，FallbackProvider 会按 fallback_models 列表中
+    的预设顺序依次尝试备用模型，提高整体可用性。
+
+    【参数说明】
+    - config: Config → 全局配置对象
+    - preset_name: str | None → 模型预设名（如 "fast"、"smart"）
+    - preset: ModelPresetConfig | None → 直接传入的预设（优先级高于 preset_name）
+    - model: str | None → 模型名覆盖
+
+    【返回值】
+    - LLMProvider: 可直接用于 chat() / chat_stream() 调用的 Provider 实例
     """
     resolved = _resolve_model_preset(config, preset_name=preset_name, preset=preset)
     provider = _make_provider_core(config, preset_name=preset_name, preset=preset, model=model)

@@ -1,4 +1,24 @@
-"""Cron service for scheduling agent tasks."""
+"""Cron 定时任务调度服务。
+
+【中文名称】定时任务执行器
+
+这个模块是 `nanobot.cron.types` 的“执行层”。
+如果说 `types.py` 负责定义“任务长什么样”，这里负责的就是：
+
+1. 把任务从磁盘加载进来；
+2. 计算下一次执行时间；
+3. 用定时器等待；
+4. 到点后调用 `on_job(job)` 执行任务；
+5. 把执行结果、历史记录、下一次调度重新写回磁盘。
+
+【一个容易忽略的点】
+
+这里不仅考虑“正常调度”，还考虑了：
+
+- 存储文件损坏后的保护性恢复
+- 原子写入，避免容器退出时把 `jobs.json` 写坏
+- 多实例/热更新场景下的 action merge
+"""
 
 import asyncio
 import json
@@ -25,18 +45,22 @@ from nanobot.cron.types import (
 
 
 def _now_ms() -> int:
+    """返回当前 Unix 时间戳（毫秒）。"""
     return int(time.time() * 1000)
 
 
 def _compute_next_run(schedule: CronSchedule, now_ms: int) -> int | None:
-    """Compute next run time in ms."""
+    """根据调度配置计算“下一次执行时间”。
+
+    返回值是毫秒时间戳；如果当前配置无法执行，则返回 `None`。
+    """
     if schedule.kind == "at":
         return schedule.at_ms if schedule.at_ms and schedule.at_ms > now_ms else None
 
     if schedule.kind == "every":
         if not schedule.every_ms or schedule.every_ms <= 0:
             return None
-        # Next interval from now
+        # `every` 模式并不是从“上一次执行时间”推导，而是直接从当前时刻向后推。
         return now_ms + schedule.every_ms
 
     if schedule.kind == "cron" and schedule.expr:
@@ -44,7 +68,8 @@ def _compute_next_run(schedule: CronSchedule, now_ms: int) -> int | None:
             from zoneinfo import ZoneInfo
 
             from croniter import croniter
-            # Use caller-provided reference time for deterministic scheduling
+            # 使用调用方传入的基准时间，而不是函数内部自己取 now，
+            # 这样测试和重算逻辑会更稳定、更可预测。
             base_time = now_ms / 1000
             tz = ZoneInfo(schedule.tz) if schedule.tz else datetime.now().astimezone().tzinfo
             base_dt = datetime.fromtimestamp(base_time, tz=tz)
@@ -58,7 +83,7 @@ def _compute_next_run(schedule: CronSchedule, now_ms: int) -> int | None:
 
 
 def _validate_schedule_for_add(schedule: CronSchedule) -> None:
-    """Validate schedule fields that would otherwise create non-runnable jobs."""
+    """校验新增/更新任务时的调度配置是否合法。"""
     if schedule.tz and schedule.kind != "cron":
         raise ValueError("tz can only be used with cron schedules")
 
@@ -72,7 +97,7 @@ def _validate_schedule_for_add(schedule: CronSchedule) -> None:
 
 
 class CronService:
-    """Service for managing and executing scheduled jobs."""
+    """管理并执行定时任务的服务对象。"""
 
     _MAX_RUN_HISTORY = 20
 
@@ -82,6 +107,14 @@ class CronService:
         on_job: Callable[[CronJob], Coroutine[Any, Any, str | None]] | None = None,
         max_sleep_ms: int = 300_000,  # 5 minutes
     ):
+        """初始化 Cron 服务。
+
+        参数说明：
+
+        - `store_path`：定时任务持久化文件位置
+        - `on_job`：任务真正触发时要调用的协程回调
+        - `max_sleep_ms`：定时器最长睡眠时间，用来避免长时间睡眠导致的状态滞后
+        """
         self.store_path = store_path
         self._action_path = store_path.parent / "action.jsonl"
         self._lock = FileLock(str(self._action_path.parent) + ".lock")
@@ -175,6 +208,11 @@ class CronService:
         return jobs, version
 
     def _merge_action(self):
+        """把离线追加到 `action.jsonl` 的变更合并回主存储。
+
+        这个机制主要服务“服务没在运行，但外部又改了任务”的场景。
+        外部变更先记到 action log，等真正加载 store 时再统一合并。
+        """
         if not self._action_path.exists():
             return
 
@@ -211,15 +249,17 @@ class CronService:
         return
 
     def _load_store(self) -> CronStore | None:
-        """Load jobs from disk. Reloads automatically if file was modified externally.
-        - Reload every time because it needs to merge operations on the jobs object from other instances.
-        - During _on_timer execution, return the existing store to prevent concurrent
-          _load_store calls (e.g. from list_jobs polling) from replacing it mid-execution.
-        - When the on-disk store exists but is unreadable: keep using the
-          previous in-memory ``self._store`` if we already have one (so a
-          transient corruption does not drop live jobs); only the very first
-          load (during ``start``) can return ``None`` to signal an unrecoverable
-          state to the caller.
+        """加载并合并当前任务存储。
+
+        这里的策略有三个重点：
+
+        1. 平时每次都尽量从磁盘重载
+           因为可能有其它实例或管理入口修改了任务。
+        2. 如果当前正在 `_on_timer` 执行中
+           就先继续用内存中的 `self._store`，避免执行中途被替换。
+        3. 如果磁盘文件损坏
+           且内存里还有最近一次的健康快照，就继续沿用内存快照，
+           避免因为瞬时损坏把所有活跃任务都丢掉。
         """
         if self._timer_active and self._store:
             return self._store
@@ -238,7 +278,7 @@ class CronService:
         return self._store
 
     def _save_store(self) -> None:
-        """Save jobs to disk."""
+        """把当前任务列表保存到磁盘。"""
         if not self._store:
             return
 
@@ -326,14 +366,12 @@ class CronService:
             raise
 
     async def start(self) -> None:
-        """Start the cron service."""
+        """启动 Cron 服务。"""
         self._running = True
         loaded = self._load_store()
         if loaded is None:
-            # Store file existed but was corrupt and has been preserved with
-            # a ``.corrupt-<ts>`` suffix.  Bail out instead of starting with
-            # an empty store; that would call ``_save_store`` and overwrite
-            # the now-renamed (but still recoverable) data with [].
+            # 如果启动时就发现主存储损坏，这里宁可拒绝启动，也不要拿空列表覆盖掉
+            # 仍有恢复机会的历史数据。
             self._running = False
             raise RuntimeError(
                 f"cron store at {self.store_path} is corrupt and was preserved; "
@@ -346,14 +384,14 @@ class CronService:
         logger.info("Cron service started with {} jobs", len(self._store.jobs if self._store else []))
 
     def stop(self) -> None:
-        """Stop the cron service."""
+        """停止 Cron 服务，并取消下一次计时器。"""
         self._running = False
         if self._timer_task:
             self._timer_task.cancel()
             self._timer_task = None
 
     def _recompute_next_runs(self) -> None:
-        """Recompute next run times for all enabled jobs."""
+        """为所有启用中的任务重新计算下一次执行时间。"""
         if not self._store:
             return
         now = _now_ms()
@@ -362,7 +400,7 @@ class CronService:
                 job.state.next_run_at_ms = _compute_next_run(job.schedule, now)
 
     def _get_next_wake_ms(self) -> int | None:
-        """Get the earliest next run time across all jobs."""
+        """找出所有任务里最早的下一次唤醒时间。"""
         if not self._store:
             return None
         times = [j.state.next_run_at_ms for j in self._store.jobs
@@ -370,7 +408,7 @@ class CronService:
         return min(times) if times else None
 
     def _arm_timer(self) -> None:
-        """Schedule the next timer tick."""
+        """根据当前任务状态重新挂载下一次定时器。"""
         if self._timer_task:
             self._timer_task.cancel()
 
@@ -392,11 +430,10 @@ class CronService:
         self._timer_task = asyncio.create_task(tick())
 
     async def _on_timer(self) -> None:
-        """Handle timer tick - run due jobs."""
+        """处理一次定时器触发：找出到点任务并执行。"""
         self._load_store()
-        # If a hot reload found a corrupt store on disk, ``self._store`` may
-        # still hold the previous, known-good in-memory snapshot.  Keep using
-        # it rather than crashing the timer or wiping live jobs.
+        # 如果热重载时发现磁盘文件损坏，但内存里还有上一次健康快照，
+        # 就继续依赖内存快照运行，而不是直接崩溃或把任务清空。
         if not self._store:
             self._arm_timer()
             return
@@ -418,7 +455,7 @@ class CronService:
         self._arm_timer()
 
     async def _execute_job(self, job: CronJob) -> None:
-        """Execute a single job."""
+        """执行单个定时任务，并更新它的运行状态。"""
         start_ms = _now_ms()
         logger.info("Cron: executing job '{}' ({})", job.name, job.id)
 
@@ -447,7 +484,7 @@ class CronService:
         ))
         job.state.run_history = job.state.run_history[-self._MAX_RUN_HISTORY:]
 
-        # Handle one-shot jobs
+        # `at` 类型本质上是一次性任务：执行完要么删除，要么禁用。
         if job.schedule.kind == "at":
             if job.delete_after_run:
                 self._store.jobs = [j for j in self._store.jobs if j.id != job.id]
@@ -455,20 +492,21 @@ class CronService:
                 job.enabled = False
                 job.state.next_run_at_ms = None
         else:
-            # Compute next run
+            # 重复任务执行完后，立即推算下一次运行时间。
             job.state.next_run_at_ms = _compute_next_run(job.schedule, _now_ms())
 
     def _append_action(self, action: Literal["add", "del", "update"], params: dict):
+        """把变更以追加日志形式写入 action 文件。"""
         self.store_path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
             with open(self._action_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps({"action": action, "params": params}, ensure_ascii=False) + "\n")
 
 
-    # ========== Public API ==========
+    # ========== 对外公共 API ==========
 
     def list_jobs(self, include_disabled: bool = False) -> list[CronJob]:
-        """List all jobs."""
+        """列出任务；默认只返回启用中的任务。"""
         store = self._load_store()
         jobs = store.jobs if include_disabled else [j for j in store.jobs if j.enabled]
         return sorted(jobs, key=lambda j: j.state.next_run_at_ms or float('inf'))
@@ -485,7 +523,7 @@ class CronService:
         channel_meta: dict | None = None,
         session_key: str | None = None,
     ) -> CronJob:
-        """Add a new job."""
+        """新增一个用户级定时任务。"""
         _validate_schedule_for_add(schedule)
         now = _now_ms()
 
@@ -520,7 +558,11 @@ class CronService:
         return job
 
     def register_system_job(self, job: CronJob) -> CronJob:
-        """Register an internal system job (idempotent on restart)."""
+        """注册一个系统内部任务。
+
+        系统任务通常由框架自己维护，所以这里采用“按 ID 覆盖”的幂等策略，
+        这样重启后重复注册也不会产生多份副本。
+        """
         store = self._load_store()
         now = _now_ms()
         job.state = CronJobState(next_run_at_ms=_compute_next_run(job.schedule, now))
@@ -534,7 +576,7 @@ class CronService:
         return job
 
     def remove_job(self, job_id: str) -> Literal["removed", "protected", "not_found"]:
-        """Remove a job by ID, unless it is a protected system job."""
+        """按 ID 删除任务；系统保护任务不可删除。"""
         store = self._load_store()
         job = next((j for j in store.jobs if j.id == job_id), None)
         if job is None:
@@ -559,7 +601,7 @@ class CronService:
         return "not_found"
 
     def enable_job(self, job_id: str, enabled: bool = True) -> CronJob | None:
-        """Enable or disable a job."""
+        """启用或禁用一个任务。"""
         store = self._load_store()
         for job in store.jobs:
             if job.id == job_id:
@@ -589,10 +631,13 @@ class CronService:
         to: str | None = ...,
         delete_after_run: bool | None = None,
     ) -> CronJob | Literal["not_found", "protected"]:
-        """Update mutable fields of an existing job. System jobs cannot be updated.
+        """更新一个已有任务的可变字段。
 
-        For ``channel`` and ``to``, pass an explicit value (including ``None``)
-        to update; omit (sentinel ``...``) to leave unchanged.
+        注意：
+
+        - 系统任务不允许通过这里修改；
+        - `channel` / `to` 使用 `...` 作为“保持不变”的哨兵值；
+        - 显式传 `None` 则表示“把字段清空”。
         """
         store = self._load_store()
         job = next((j for j in store.jobs if j.id == job_id), None)
@@ -631,7 +676,7 @@ class CronService:
         return job
 
     async def run_job(self, job_id: str, force: bool = False) -> bool:
-        """Manually run a job without disturbing the service's running state."""
+        """手动触发一次任务执行，而不打乱服务整体运行状态。"""
         was_running = self._running
         self._running = True
         try:
@@ -650,12 +695,12 @@ class CronService:
                 self._arm_timer()
 
     def get_job(self, job_id: str) -> CronJob | None:
-        """Get a job by ID."""
+        """按 ID 获取单个任务。"""
         store = self._load_store()
         return next((j for j in store.jobs if j.id == job_id), None)
 
     def status(self) -> dict:
-        """Get service status."""
+        """返回 Cron 服务的简要状态快照。"""
         store = self._load_store()
         return {
             "enabled": self._running,

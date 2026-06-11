@@ -80,6 +80,27 @@ _HTML_DOWNLOAD_PREFIXES = (b"<!doctype html", b"<html")
 class SlackChannel(BaseChannel):
     """基于 Socket Mode 的 Slack 渠道适配器。
 
+    【中文名称】Slack 渠道适配器
+
+    【功能说明】
+    通过 Slack Socket Mode 将 nanobot 接入 Slack 工作区。
+    Socket Mode 的核心优势是不需要暴露公网 webhook——nanobot 主动连接
+    Slack 的 WebSocket，所有事件都从这条长连接推送过来。
+
+    【关键特性】
+    - 支持普通消息、@机器人消息和按钮交互
+    - 线程内回复（reply_in_thread）：在 Slack thread 中回复，保持上下文
+    - Markdown → Slack mrkdwn 转换（通过 slackify_markdown）
+    - 附件下载：支持下载 Slack 私有文件（通过 user_token 权限）
+    - 独立的 DM 策略：私聊和群聊/频道可以有不同的权限控制
+
+    【Socket Mode 的事件处理流程】
+    1. SocketModeClient 连接 Slack WSS
+    2. 收到 events_api 类型请求 → _on_socket_request 回调
+    3. 立即回复 SocketModeResponse(envelope_id) 确认收到
+    4. 异步处理消息逻辑（权限校验、附件下载、上下文提取）
+    5. 最终通过 _handle_message 发送到 MessageBus
+
     如果你是初学者，建议重点看这三个入口：
     - ``start()``：建立连接
     - ``_on_socket_request()``：处理 Slack 推来的事件

@@ -212,7 +212,12 @@ class MatrixConfig(Base):
 
 
 class MatrixChannel(BaseChannel):
-    """Matrix (Element) channel using long-polling sync."""
+    """【中文名称】Matrix (Element) 渠道适配器
+
+    通过长轮询 sync（/sync 端点）接入 Matrix 联邦通讯协议。
+    支持密文房间（E2E encryption）、媒体文件上传下载和流式消息编辑。
+
+    Matrix (Element) channel using long-polling sync."""
 
     name = "matrix"
     display_name = "Matrix"

@@ -1,4 +1,12 @@
-"""Logging helpers for the WebUI WebSocket server surface."""
+"""WebUI WebSocket 服务的日志降噪辅助函数。
+
+【中文名称】WebSocket 日志过滤器
+
+浏览器在页面刷新、标签页关闭、服务重启时，WebSocket 握手失败日志经常很多。
+其中有一类“客户端其实已经断开”的异常，本质上只是噪声，不值得把日志刷爆。
+
+这个模块就是专门过滤这类噪声的。
+"""
 
 from __future__ import annotations
 
@@ -10,6 +18,7 @@ OPENING_HANDSHAKE_FAILED_MESSAGE = "opening handshake failed"
 
 
 def _exception_chain_has_disconnect(exc: BaseException | None) -> bool:
+    """沿着异常链向下找，判断是否包含“对端已断开”类异常。"""
     seen: set[int] = set()
     while exc is not None:
         ident = id(exc)
@@ -28,9 +37,10 @@ def _exception_chain_has_disconnect(exc: BaseException | None) -> bool:
 
 
 class WebSocketHandshakeNoiseFilter(logging.Filter):
-    """Suppress restart-time handshakes where the browser already disconnected."""
+    """过滤浏览器已断开时产生的握手失败噪声日志。"""
 
     def filter(self, record: logging.LogRecord) -> bool:
+        """返回 `False` 表示这条日志应该被抑制。"""
         if record.getMessage() != OPENING_HANDSHAKE_FAILED_MESSAGE:
             return True
         exc_info = record.exc_info
@@ -39,6 +49,7 @@ class WebSocketHandshakeNoiseFilter(logging.Filter):
 
 
 def websockets_server_logger() -> logging.Logger:
+    """获取并配置 `websockets.server` logger。"""
     ws_logger = logging.getLogger("websockets.server")
     if not any(isinstance(f, WebSocketHandshakeNoiseFilter) for f in ws_logger.filters):
         ws_logger.addFilter(WebSocketHandshakeNoiseFilter())

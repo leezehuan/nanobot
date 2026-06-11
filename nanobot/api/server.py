@@ -1,7 +1,28 @@
-"""OpenAI-compatible HTTP API server for a fixed nanobot session.
+"""OpenAI 兼容 HTTP API 服务器。
 
-Provides /v1/chat/completions and /v1/models endpoints.
-All requests route to a single persistent API session.
+【中文名称】兼容 OpenAI 的 API 服务端
+
+这个模块把 nanobot 包装成一个对外 HTTP 服务，核心目标是让外部程序能像
+调用 OpenAI 一样调用 nanobot。
+
+当前主要提供三个路由：
+
+1. `/v1/chat/completions`
+   最核心的对话入口，支持普通 JSON 请求和带文件的 multipart 请求。
+2. `/v1/models`
+   返回当前服务暴露出来的模型名。
+3. `/health`
+   提供健康检查。
+
+【一个非常重要的设计点】
+
+这里不是为每个请求都临时创建一个全新 Agent，而是把请求路由到一个持久会话。
+因此它还要负责处理：
+
+- session_key 的映射
+- 同一会话的串行锁
+- 流式 SSE 输出
+- 文件上传解析
 """
 
 from __future__ import annotations
@@ -43,11 +64,12 @@ API_CHAT_ID = "default"
 
 
 # ---------------------------------------------------------------------------
-# Response helpers
+# 响应辅助函数
 # ---------------------------------------------------------------------------
 
 
 def _error_json(status: int, message: str, err_type: str = "invalid_request_error") -> web.Response:
+    """按 OpenAI 风格返回错误 JSON。"""
     return web.json_response(
         {"error": {"message": message, "type": err_type, "code": status}},
         status=status,
@@ -55,6 +77,7 @@ def _error_json(status: int, message: str, err_type: str = "invalid_request_erro
 
 
 def _chat_completion_response(content: str, model: str) -> dict[str, Any]:
+    """构造一个非流式 chat completion 响应体。"""
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
         "object": "chat.completion",
@@ -72,7 +95,16 @@ def _chat_completion_response(content: str, model: str) -> dict[str, Any]:
 
 
 def _response_text(value: Any) -> str:
-    """Normalize process_direct output to plain assistant text."""
+    """把 `process_direct` 的返回值统一归一化成纯文本。
+
+    nanobot 内部返回值可能是：
+
+    - `None`
+    - 拥有 `.content` 属性的对象
+    - 直接就是字符串
+
+    对 API 层来说，最终都要转换成稳定的 assistant 文本输出。
+    """
     if value is None:
         return ""
     if hasattr(value, "content"):
@@ -80,12 +112,12 @@ def _response_text(value: Any) -> str:
     return str(value)
 
 # ---------------------------------------------------------------------------
-# SSE helpers
+# SSE（流式输出）辅助函数
 # ---------------------------------------------------------------------------
 
 
 def _sse_chunk(delta: str, model: str, chunk_id: str, finish_reason: str | None = None) -> bytes:
-    """Format a single OpenAI-compatible SSE chunk."""
+    """格式化一个 OpenAI 兼容的 SSE 分片。"""
     payload = {
         "id": chunk_id,
         "object": "chat.completion.chunk",
@@ -105,12 +137,21 @@ def _sse_chunk(delta: str, model: str, chunk_id: str, finish_reason: str | None 
 _SSE_DONE = b"data: [DONE]\n\n"
 
 # ---------------------------------------------------------------------------
-# Upload helpers
+# 上传/请求体解析辅助函数
 # ---------------------------------------------------------------------------
 
 
 def _parse_json_content(body: dict) -> tuple[str, list[str]]:
-    """Parse JSON request body. Returns (text, media_paths)."""
+    """解析 JSON 请求体，返回 `(文本, 媒体文件路径列表)`。
+
+    这里兼容两种 `content` 形态：
+
+    1. 纯字符串
+    2. OpenAI 风格的多段内容数组（text / image_url）
+
+    注意：这里不允许远程图片 URL，只接受 base64 data URL，
+    这是为了避免服务端替用户访问未知外链。
+    """
     messages = body.get("messages")
     if not isinstance(messages, list) or len(messages) != 1:
         raise ValueError("Only a single user message is supported")
@@ -150,7 +191,15 @@ def _parse_json_content(body: dict) -> tuple[str, list[str]]:
 
 
 async def _parse_multipart(request: web.Request) -> tuple[str, list[str], str | None, str | None]:
-    """Parse multipart/form-data. Returns (text, media_paths, session_id, model)."""
+    """解析 `multipart/form-data` 请求。
+
+    返回值依次是：
+
+    - 文本消息
+    - 落盘后的媒体文件路径列表
+    - session_id
+    - 请求方显式指定的 model
+    """
     media_dir = get_media_dir("api")
     reader = await request.multipart()
     text = ""
@@ -187,12 +236,27 @@ async def _parse_multipart(request: web.Request) -> tuple[str, list[str], str | 
 
 
 # ---------------------------------------------------------------------------
-# Route handlers
+# 路由处理函数
 # ---------------------------------------------------------------------------
 
 
 async def handle_chat_completions(request: web.Request) -> web.Response:
-    """POST /v1/chat/completions — supports JSON and multipart/form-data."""
+    """处理 `/v1/chat/completions` 请求。
+
+    【完整流程】
+
+    1. 识别请求体类型（JSON / multipart）
+    2. 解析文本、媒体、session_id、model
+    3. 校验请求的 model 是否等于当前服务配置的 model
+    4. 根据 session_id 生成 session_key，并拿到该会话的串行锁
+    5. 如果 `stream=true`，走 SSE 流式输出路径
+    6. 否则走普通一次性 JSON 返回路径
+
+    【为什么要有 session_lock】
+
+    同一个会话如果并发进入两条请求，历史消息和工具状态可能互相打架。
+    所以这里按 `session_key` 串行化，保证同一会话同一时间只跑一个请求。
+    """
     content_type = request.content_type or ""
     if not isinstance(content_type, str):
         content_type = ""
@@ -233,7 +297,7 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
         "API request session_key={} media={} text={} stream={}",
         session_key, len(media_paths), text[:80], stream,
     )
-    # -- streaming path --
+    # === 流式返回路径 ===
     if stream:
         resp = web.StreamResponse()
         resp.content_type = "text/event-stream"
@@ -247,18 +311,20 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
         emitted_content = False
 
         async def _on_stream(token: str) -> None:
+            """把 Agent 流式吐出的 token 推到 SSE 队列。"""
             nonlocal emitted_content
             if token:
                 emitted_content = True
             await queue.put(token)
 
         async def _on_stream_end(*_a: Any, **_kw: Any) -> None:
-            # Agent stream-end callbacks mark generation segment boundaries.
-            # Tool-backed requests may continue after a segment ends, so the
-            # HTTP SSE stream is closed only when process_direct returns.
+            # Agent 内部的 stream_end 只表示“当前生成片段结束了”，
+            # 但如果中间还会继续调工具、再生成新的片段，整个 HTTP SSE
+            # 连接还不能立刻关掉。真正的关闭时机是 process_direct 返回。
             return None
 
         async def _run() -> None:
+            """后台运行真正的 Agent 请求，并把结果持续塞进队列。"""
             nonlocal stream_failed
             try:
                 async with session_lock:
@@ -274,6 +340,8 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
                         ),
                         timeout=timeout_s,
                     )
+                    # 某些情况下，底层没有逐 token 回调，但最终会直接返回完整文本。
+                    # 这时我们把完整文本补进队列，避免前端拿到空流。
                     if not emitted_content:
                         response_text = _response_text(response)
                         if response_text.strip():
@@ -302,7 +370,7 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
             await resp.write(_SSE_DONE)
         return resp
 
-    # -- non-streaming path (original logic) --
+    # === 非流式返回路径 ===
     fallback = EMPTY_FINAL_RESPONSE_MESSAGE
 
     try:
@@ -320,6 +388,7 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
                 )
                 response_text = _response_text(response)
 
+                # 如果上游返回了空文本，再重试一次；两次都空时才使用兜底文案。
                 if not response_text or not response_text.strip():
                     logger.warning("Empty response for session {}, retrying", session_key)
                     retry_response = await asyncio.wait_for(
@@ -350,7 +419,7 @@ async def handle_chat_completions(request: web.Request) -> web.Response:
 
 
 async def handle_models(request: web.Request) -> web.Response:
-    """GET /v1/models"""
+    """返回当前 API 服务暴露的模型列表。"""
     model_name = request.app.get("model_name", "nanobot")
     return web.json_response(
         {
@@ -368,30 +437,31 @@ async def handle_models(request: web.Request) -> web.Response:
 
 
 async def handle_health(request: web.Request) -> web.Response:
-    """GET /health"""
+    """健康检查接口。常用于容器探针或反向代理存活检测。"""
     return web.json_response({"status": "ok"})
 
 
 # ---------------------------------------------------------------------------
-# App factory
+# 应用工厂
 # ---------------------------------------------------------------------------
 
 
 def create_app(
     agent_loop, model_name: str = "nanobot", request_timeout: float = 120.0
 ) -> web.Application:
-    """Create the aiohttp application.
+    """创建 aiohttp 应用实例。
 
-    Args:
-        agent_loop: An initialized AgentLoop instance.
-        model_name: Model name reported in responses.
-        request_timeout: Per-request timeout in seconds.
+    参数说明：
+
+    - `agent_loop`：已经初始化好的 AgentLoop，API 请求最终都会转给它处理
+    - `model_name`：对外宣称的模型名字
+    - `request_timeout`：单个请求最大处理时长，单位秒
     """
-    app = web.Application(client_max_size=20 * 1024 * 1024)  # 20MB for base64 images
+    app = web.Application(client_max_size=20 * 1024 * 1024)  # 允许 20MB 级别的 base64 图片请求。
     app["agent_loop"] = agent_loop
     app["model_name"] = model_name
     app["request_timeout"] = request_timeout
-    app["session_locks"] = {}  # per-user locks, keyed by session_key
+    app["session_locks"] = {}  # 会话级锁表：key 是 session_key，value 是 asyncio.Lock。
 
     app.router.add_post("/v1/chat/completions", handle_chat_completions)
     app.router.add_get("/v1/models", handle_models)

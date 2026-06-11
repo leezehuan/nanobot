@@ -81,6 +81,15 @@ class _ServerFeatures:
 
 class EmailChannel(BaseChannel):
     """
+    【中文名称】邮件渠道适配器
+
+    【功能说明】
+    通过 IMAP 轮询收件箱 + SMTP 发送回复实现邮件 Agent。
+    每条未读邮件作为一个 inbound 事件，回复通过 SMTP 发回发件人地址。
+
+    【收件流】IMAP 定期轮询 → 解析邮件正文+附件 → _handle_message → AgentLoop
+    【发件流】AgentLoop → send() → SMTP 发送 → 标记原邮件为已读
+
     Email channel.
 
     Inbound:

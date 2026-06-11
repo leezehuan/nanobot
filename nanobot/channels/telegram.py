@@ -293,6 +293,34 @@ class TelegramChannel(BaseChannel):
     """
     Telegram channel using long polling or webhook mode.
 
+    【中文名称】Telegram 渠道适配器
+
+    【功能说明】
+    将 nanobot 的 MessageBus 与 Telegram Bot API 桥接起来的完整适配器。
+
+    【支持的运行模式】
+    - polling 模式（默认）：bot 定期向 Telegram 服务器拉取新消息，适合开发环境
+    - webhook 模式：Telegram 主动推送消息到 nanobot 的 HTTP 端点，适合生产环境
+
+    【入站消息处理流程】
+    1. python-telegram-bot 的 Handler 捕获消息 / 命令
+    2. 消息/命令进入有序缓冲队列（_enqueue_ordered_update），按 message_id 排序后序列处理，保证同一会话内消息顺序不乱
+    3. 图片/视频/语音/文档等媒体文件下载到本地 media 目录
+    4. 语音消息自动转写为文本（transcribe_audio）
+    5. 最终通过 self._handle_message() 发送到 MessageBus，进入 AgentLoop
+
+    【出站消息处理流程】
+    1. MessageBus 输出 OutboundMessage 到达 send() 方法
+    2. Markdown 文本转换为 Telegram HTML 格式（_markdown_to_telegram_html）
+    3. 支持流式消息编辑（send_delta），让用户在 LLM 生成过程中看到实时预览
+    4. 超长消息自动分片（split_message），处理 4000 字符限制
+
+    【关键内部状态】
+    - _stream_bufs: 按 chat_id 存储流式缓冲区，支持渐近式消息编辑
+    - _inbound_buffers/_inbound_workers: 有序入站队列，保证消息时序
+    - _media_group_buffers: 媒体组缓冲（0.6 秒等待窗口），多张图合并为一次 turn
+    - _message_threads: 论坛话题 ID 缓存，确保回复在正确的 thread 内
+
     Long polling is the default. Webhook mode requires a public HTTPS URL and a
     Telegram secret token.
     """
@@ -376,7 +404,42 @@ class TelegramChannel(BaseChannel):
         return content
 
     async def start(self) -> None:
-        """Start the Telegram bot."""
+        """启动 Telegram Bot，进入消息接收循环。
+
+        【中文名称】启动 Telegram Bot
+
+        【功能说明】
+        这是 Telegram 渠道的完整生命周期入口，执行以下步骤：
+
+        【启动流程 —— 6 个阶段】
+        Phase 1 —— 创建 HTTPX 请求池：
+          - api_request 池：处理出站消息发送（connection_pool_size 可配置）
+          - poll_request 池：独立的长轮询连接（固定 4 连接），避免出站消息占用轮询通道
+
+        Phase 2 —— 注册消息处理器：
+          - /start 命令 → _on_start（打招呼）
+          - 业务命令（/new /stop /status /history 等）→ _forward_command（转发到 AgentLoop）
+          - /help 命令 → _on_help
+          - 普通消息（文本/图片/视频/语音/文档/位置）→ _on_message
+          - 可选：inline keyboard 回调 → _on_callback_query
+
+        Phase 3 —— 初始化并获取 Bot 身份：
+          - 调用 get_me() 获取 bot 的 username 和 user_id
+          - 注册 Telegram 命令菜单（set_my_commands）
+
+        Phase 4 —— 启动更新接收：
+          - polling 模式：start_polling，进入长轮询循环
+          - webhook 模式：start_webhook，在本地端口上监听 Telegram 推送
+
+        Phase 5 —— 运行循环：只要 self._running 为 True，就保持 asyncio.sleep(1) 循环
+
+        【两种模式的网络架构差异】
+        polling:  nanobot → [主动拉取] → Telegram 服务器（每几秒一次）
+        webhook:  Telegram 服务器 → [主动推送] → nanobot HTTP 端点
+
+        【参数说明】
+        无显式参数，所有配置从 self.config (TelegramConfig) 读取。
+        """
         if not self.config.token:
             self.logger.error("bot token not configured")
             return
@@ -491,7 +554,23 @@ class TelegramChannel(BaseChannel):
             await asyncio.sleep(1)
 
     async def stop(self) -> None:
-        """Stop the Telegram bot."""
+        """停止 Telegram Bot，清理所有运行中任务。
+
+        【中文名称】停止 Telegram Bot
+
+        【功能说明】
+        优雅关闭 Telegram 渠道的所有活动资源：
+
+        1. 取消所有 typing indicator 任务（_typing_tasks）
+        2. 取消所有媒体组缓冲任务（_media_group_tasks）
+        3. 取消所有入站消息工作协程（_inbound_workers）
+        4. 关闭 polling/webhook updater
+        5. 停止并关闭 Application，释放 HTTPX 连接池
+
+        【注意】
+        该方法会被 ChannelManager 在 nanobot 关闭时调用。
+        停止后 _app 会被置为 None，新消息将无法发送。
+        """
         self._running = False
 
         # Cancel all typing indicators
@@ -534,7 +613,39 @@ class TelegramChannel(BaseChannel):
         return path.startswith(("http://", "https://"))
 
     async def send(self, msg: OutboundMessage) -> None:
-        """Send a message through Telegram."""
+        """通过 Telegram 发送一条完整消息。
+
+        【中文名称】发送出站消息
+
+        【功能说明】
+        这是 ChannelManager 调用 send() 分发 OutboundMessage 到 Telegram 的入口。
+        一次完整的 send 调用执行以下步骤：
+
+        【发送流程 —— 4 个阶段】
+        Phase 1 —— 清理状态：
+          - 如果不是进度中间态（_progress 为 False），停止 typing indicator
+          - 移除消息上的 emoji 反应标记
+
+        Phase 2 —— 发送媒体文件：
+          - 遍历 msg.media 列表，根据文件扩展名判断类型（photo/video/voice/audio/document）
+          - 远程 URL 直接传给 Telegram API（不做本地下载）
+          - 本地文件读取为 bytes 后上传
+          - 通过 _call_with_retry 包装，自动处理网络超时和 Flood Control
+
+        Phase 3 —— 发送文本内容：
+          - 跳过 "[empty message]" 占位符
+          - 工具提示（_tool_hint）渲染为可折叠 blockquote
+          - 内联键盘（inline_keyboards）作为最后一条消息的 reply_markup 附加
+          - 超长消息通过 split_message() 分片为 4000 字以内的多个 chunk
+          - Markdown 转 HTML（_markdown_to_telegram_html），失败时回退到纯文本
+
+        【参数说明】
+        - msg: OutboundMessage → 从 MessageBus 分发的出站消息，包含：
+          - content: 回复文本
+          - media: 媒体文件路径列表
+          - chat_id: 目标聊天 ID
+          - metadata: 元数据（message_thread_id, message_id, _tool_hint, _progress 等）
+        """
         if not self._app:
             self.logger.warning("bot not running")
             return
@@ -642,7 +753,26 @@ class TelegramChannel(BaseChannel):
                 )
 
     async def _call_with_retry(self, fn, *args, **kwargs):
-        """Call an async Telegram API function with retry on pool/network timeout and RetryAfter."""
+        """带重试机制的 Telegram API 调用包装器。
+
+        【中文名称】带重试的 API 调用
+
+        【功能说明】
+        对 Telegram Bot API 调用做 2 种错误的重试处理：
+
+        1. TimedOut（网络超时）→ 指数退避重试（0.5s → 1s → 2s），最多 3 次
+        2. RetryAfter（Flood Control / 频率限制）→ 按 Telegram 返回的 retry_after
+           秒数等待后重试，最多 3 次
+
+        3 次重试后仍然失败则向上抛出异常，由上层调用者（如 ChannelManager）处理。
+
+        【参数说明】
+        - fn: 异步可调用对象 → Telegram Bot API 方法（如 send_message, edit_message_text）
+        - *args, **kwargs: 传给 fn 的参数
+
+        【返回值】
+        fn 的原始返回值
+        """
         from telegram.error import RetryAfter
 
         for attempt in range(1, _SEND_MAX_RETRIES + 1):
@@ -706,7 +836,41 @@ class TelegramChannel(BaseChannel):
         return isinstance(exc, BadRequest) and "message is not modified" in str(exc).lower()
 
     async def send_delta(self, chat_id: str, delta: str, metadata: dict[str, Any] | None = None) -> None:
-        """Progressive message editing: send on first delta, edit on subsequent ones."""
+        """渐进式消息编辑：首条发送，后续编辑同一条消息。
+
+        【中文名称】流式增量发送
+
+        【功能说明】
+        这是 Telegram 渠道实现"打字机效果"的核心方法。ChannelManager 在收到
+        LLM 的流式 token 时不断调用此方法，让用户在 LLM 生成过程中就能看到
+        实时更新的消息内容。
+
+        【完整流程 —— 3 种情况】
+        情况 A —— 流结束（_stream_end 为 True）：
+          1. 停止 typing indicator，移除 reaction
+          2. 将完整的 markdown 文本转换为 Telegram HTML
+          3. 如果 HTML 长度超过 4096 字符：分片发送 ——
+             第一条编辑进原消息，后续从第二条开始作为独立消息追加
+          4. Edit 失败时回退到发送原始 markdown 文本
+          5. 回退也失败时使用 _send_text 做 HTML→plain text 双保险
+
+        情况 B —— 首次 delta（buf.message_id 为 None）：
+          1. 创建新的 _StreamBuf，存储 chat_id 对应的流式状态
+          2. 去掉 markdown 标记（_strip_md_block），以纯文本形式发送首条消息
+          3. 记录 message_id，后续 delta 都编辑同一条消息
+
+        情况 C —— 中途 delta：
+          1. 追加 delta 到 buffer
+          2. 仅在距离上次编辑超过 stream_edit_interval 秒时才发送编辑
+          3. 如果 buffer 超过 4000 字符，调用 _flush_stream_overflow 溢出处理
+          4. 将 buffer 去掉 markdown 标记后编辑消息
+
+        【参数说明】
+        - chat_id: str → Telegram 聊天 ID
+        - delta: str → 增量文本片段
+        - metadata: dict → 可能包含 _stream_id（标记不同流）、_stream_end（流结束标记）
+          message_thread_id（话题 ID）、message_id（原始消息 ID 用于移除 reaction）
+        """
         if not self._app:
             return
         meta = metadata or {}
@@ -1161,7 +1325,22 @@ class TelegramChannel(BaseChannel):
         self._enqueue_ordered_update(kind="command", update=update, context=context)
 
     async def _process_forward_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Process a queued slash command."""
+        """处理一条排队的斜杠命令。
+
+        【中文名称】处理命令
+
+        【功能说明】
+        将 Telegram 斜杠命令转发到消息总线，由 AgentLoop 统一处理。
+
+        与普通消息的关键区别：
+        - 命令内容是斜杠指令（如 /new, /stop, /status），直接作为 content 发送
+        - 自动剥离 @bot_username 后缀（如 /new@MyBot → /new）
+        - 自动做命令别名映射（如 /dream_log → /dream-log）
+
+        【参数说明】
+        - update: Update → python-telegram-bot 的命令更新对象
+        - context: ContextTypes.DEFAULT_TYPE → Handler 上下文
+        """
         message = update.message
         user = update.effective_user
         sender_id = self._sender_id(user)
@@ -1197,7 +1376,29 @@ class TelegramChannel(BaseChannel):
         self._enqueue_ordered_update(kind="message", update=update, context=context)
 
     async def _process_message_update(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Process a queued Telegram message update."""
+        """处理一条排队的 Telegram 消息更新。
+
+        【中文名称】处理消息更新
+
+        【功能说明】
+        这是普通消息（非命令）的完整入站处理流程：
+
+        【处理流程 —— 7 个步骤】
+        Step 1 —— 权限校验：检查 sender_id 是否在 allow_from 白名单中，不允许则发配对码
+        Step 2 —— 线程上下文：缓存 message_thread_id，确保后续回复在正确的论坛话题下
+        Step 3 —— 群聊策略：非私聊消息需检查群聊策略——
+                  "open" 模式直接通过，"mention" 模式只响应 @bot 或回复 bot 的消息
+        Step 4 —— 收集文本内容：正文 + 标题（caption）+ 位置信息
+        Step 5 —— 下载当前消息的媒体（图片/语音/视频/文档）
+        Step 6 —— 提取回复上下文：被回复消息的文本 + 媒体，拼接到 content 头部
+        Step 7 —— 媒体组聚合（media_group_id 存在时）：
+                  0.6 秒缓冲窗口内将同一 media_group 的多条消息合并为一次 turn
+        Step 8 —— 最终通过 _handle_message 发送到 MessageBus，进入 AgentLoop
+
+        【参数说明】
+        - update: Update → python-telegram-bot 的消息更新对象
+        - context: ContextTypes.DEFAULT_TYPE → Handler 上下文
+        """
 
         message = update.message
         user = update.effective_user

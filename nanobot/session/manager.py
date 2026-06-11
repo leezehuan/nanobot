@@ -168,12 +168,30 @@ class Session:
     ) -> list[dict[str, Any]]:
         """返回喂给 LLM 的未压缩历史消息。
 
-        【关键处理步骤】
-        1. 只取 ``last_consolidated`` 之后的“未压缩尾部”
-        2. 先按消息条数裁剪
-        3. 再按 token 预算从尾部进一步裁剪
-        4. 修正起始边界，避免从非法 tool 结果或 assistant 半回合开始
-        5. 补回图片/CLI/MCP 附件的文字 breadcrumb
+        【中文名称】获取回放历史
+
+        【功能说明】
+        这是 Session 最重要的方法之一，决定"每次调用 LLM 时，模型能看到哪些上下文"。
+        它只返回 ``last_consolidated`` 之后未压缩的尾部消息，并经过多层裁剪确保
+        不超出上下文窗口预算。
+
+        调用链路：
+        AgentLoop._state_build() → session.get_history() → 构建成 messages → 发给 LLM
+
+        【5 个处理步骤】
+        Step 1: 切片 → 只取 last_consolidated 之后的"未压缩尾部"
+        Step 2: 消息条数裁剪 → 按 max_messages 保留最近 N 条
+        Step 3: Token 预算裁剪 → 按 max_tokens 从尾部反推保留
+        Step 4: 边界修正 → 确保窗口不从孤儿 tool result 或 assistant 半回合开始
+        Step 5: 补回面包屑 → 为图片/CLI/MCP 附件补回文字占位，让模型知道它们存在过
+
+        【参数说明】
+        - max_messages: int → 最多回放几条消息（0 表示用默认 120）
+        - max_tokens: int → token 预算上限（0 表示不限制）
+        - include_timestamps: bool → 是否给 user 消息打时间戳前缀
+
+        【返回值】
+        - list[dict]: 裁剪后的干净消息列表，每条包含 role / content / tool_calls 等字段
         """
         unconsolidated = self.messages[self.last_consolidated:]
         max_messages = max_messages if max_messages > 0 else 120
@@ -427,10 +445,22 @@ class SessionManager:
     def get_or_create(self, key: str) -> Session:
         """获取或创建一个会话。
 
-        读取顺序是：
-        1. 先看内存缓存
-        2. 缓存没有就从磁盘加载
-        3. 还没有就创建全新 Session
+        【中文名称】获取或创建会话
+
+        【功能说明】
+        这是 SessionManager 最核心的入口方法。AgentLoop 每次处理入站消息时，
+        都会先调用它来拿到当前对话的 Session 容器。
+
+        【读取顺序】
+        1. 先看内存缓存（self._cache）—— 最快，避免重复磁盘 I/O
+        2. 缓存没有就从磁盘 JSONL 文件加载 —— 恢复持久化状态
+        3. 还没有就创建全新 Session —— 首次对话或文件丢失时
+
+        【参数说明】
+        - key: str → 会话唯一键，通常是 "channel:chat_id"（如 "telegram:123456"）
+
+        【返回值】
+        - Session: 包含消息历史、元数据、压缩边界的完整会话对象
         """
         if key in self._cache:
             return self._cache[key]
@@ -564,14 +594,31 @@ class SessionManager:
     def save(self, session: Session, *, fsync: bool = False) -> None:
         """以原子方式把 Session 保存到磁盘。
 
-        【为什么强调“原子写”】
-        直接覆盖写文件时，如果中途进程崩溃，很可能留下半截文件。
-        这里采用的是：
-        1. 先写临时文件
-        2. 可选 fsync
-        3. 再 ``os.replace`` 原子替换目标文件
+        【中文名称】原子保存会话
 
-        这也是该项目会话持久化可靠性的关键设计之一。
+        【功能说明】
+        这是 nanobot 会话持久化可靠性的核心实现。它不是简单地覆盖写文件，
+        而是通过"写临时文件 → fsync → 原子 rename"的三步策略来保证：
+        即使进程在中途崩溃，也不会留下半截损坏的 JSONL 文件。
+
+        【原子写流程】
+        1. 先把整个 Session（metadata + 所有消息）写入 .jsonl.tmp 临时文件
+        2. 如果 fsync=True，则先 flush + fsync 临时文件，确保数据真正落到磁盘
+        3. 调用 os.replace(tmp_path, path) 原子替换 —— 系统保证 rename 要么全成功要么全失败
+        4. 如果 fsync=True，再 fsync 父目录，让 rename 的元数据更新也尽量持久化
+           （注意：Windows 下目录 fsync 会触发 PermissionError，所以这里捕获并跳过）
+
+        【JSONL 文件格式约定】
+        第一行是 _type="metadata" 的特殊行，包含 key、时间戳、元数据和 last_consolidated。
+        后续每一行是一条 role/content 消息的 JSON 对象。
+
+        【参数说明】
+        - session: Session → 要持久化的会话对象
+        - fsync: bool → 是否强制刷盘（程序退出前使用，常规保存可以 False）
+
+        【可靠性设计】
+        如果写入过程中发生任何异常（包括 BaseException），
+        finally 块会主动删除残留的临时文件，避免留下垃圾。
         """
         path = self._get_session_path(session.key)
         tmp_path = path.with_suffix(".jsonl.tmp")

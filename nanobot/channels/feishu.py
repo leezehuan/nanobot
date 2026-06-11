@@ -311,6 +311,19 @@ class _FeishuStreamBuf:
 
 class FeishuChannel(BaseChannel):
     """
+    【中文名称】飞书 / Lark 渠道适配器
+
+    【功能说明】
+    基于 lark-oapi SDK 的 WebSocket 长连接模式接入飞书开放平台。
+    不需要公网 IP 或 webhook——nanobot 主动连接飞书 WSS，事件实时推送。
+
+    【关键特性】
+    - CardKit 流式消息：通过飞书卡片流式 API 实现打字机效果
+    - 消息卡片 / 富文本消息内多种元素（图片、at、回复链接）
+    - 表格自动分片（超宽表格按列分割发送）
+    - 媒体文件安全：文件名按白名单过滤，拒绝危险附件
+    - 话题隔离：topic_isolation 模式下每个话题独立 session
+
     Feishu/Lark channel using WebSocket long connection.
 
     Uses WebSocket to receive events - no public IP or webhook required.

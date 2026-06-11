@@ -203,10 +203,37 @@ class BaseChannel(ABC):
     ) -> None:
         """处理渠道收到的一条消息。
 
-        这是渠道层最关键的公共辅助方法。它负责：
-        1. 做权限检查
-        2. 对未授权私聊用户发送 pairing code
-        3. 把合法消息包装成 ``InboundMessage`` 投递到总线
+        【中文名称】处理渠道消息
+
+        【功能说明】
+        这是渠道层最关键的公共辅助方法。每个具体渠道（Telegram、Discord 等）
+        在收到真实平台消息后，都应该调用它来完成：
+        1. 权限检查（allowFrom 白名单 / pairing 授权码）
+        2. 对未授权私聊用户自动发送配对码
+        3. 把合法消息包装成 InboundMessage 并投递到 MessageBus
+
+        【权限检查流程（is_allowed 内部）】
+        1. 如果 allowFrom 包含 "*" → 全开放，直接放行
+        2. 如果 sender_id 在 allowFrom 列表中 → 精确匹配通过
+        3. 如果 sender_id 已完成 pairing（已持有有效配对码）→ 放行
+        4. 否则 → 拒绝
+
+        【流式支持标记】
+        如果渠道 supports_streaming 为 True（配置 streaming=true 且
+        子类真的重写了 send_delta），则会给消息 metadata 注入
+        _wants_stream=True，让后续 AgentLoop 知道需要流式输出。
+
+        【参数说明】
+        - sender_id: str → 发送者的平台用户 ID
+        - chat_id: str → 聊天空间/频道标识
+        - content: str → 用户发送的文本
+        - media: list[str] | None → 附件文件路径列表
+        - metadata: dict | None → 渠道层私有附加信息（会合并进 InboundMessage.metadata）
+        - session_key: str | None → 可选覆盖默认的 channel:chat_id 会话键
+        - is_dm: bool → 是否为私聊消息（用于决定未授权时是否发 pairing code）
+
+        【返回值】
+        无 —— 结果通过 self.bus.publish_inbound(msg) 发布到消息总线
         """
         if not self.is_allowed(sender_id):
             if is_dm:

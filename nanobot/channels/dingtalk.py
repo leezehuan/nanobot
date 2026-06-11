@@ -165,6 +165,12 @@ class DingTalkConfig(Base):
 
 class DingTalkChannel(BaseChannel):
     """
+    【中文名称】钉钉渠道适配器
+
+    【功能说明】
+    通过 dingtalk-stream SDK 的 WebSocket 接收事件，通过 HTTP API 发送消息。
+    支持私聊（1:1）和群聊，支持图片/语音/文件等媒体附件。
+
     DingTalk channel using Stream Mode.
 
     Uses WebSocket to receive events via `dingtalk-stream` SDK.

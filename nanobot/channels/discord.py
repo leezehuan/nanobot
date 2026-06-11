@@ -337,7 +337,28 @@ if DISCORD_AVAILABLE:
 
 
 class DiscordChannel(BaseChannel):
-    """Discord channel using discord.py."""
+    """Discord channel using discord.py.
+
+    【中文名称】Discord 渠道适配器
+
+    【功能说明】
+    通过 discord.py 将 nanobot 接入 Discord 消息平台。
+
+    【关键特性】
+    - 支持应用命令（app commands/slash commands），通过 CommandTree 注册
+    - 支持私聊（DM）、群聊（guild）和线程（thread）
+    - 流式消息：与 Telegram 类似，通过 send_delta 实现打字机效果
+    - 媒体附件上传：支持图片/文件等附件，单文件最大 20MB
+    - 群聊策略：mention 模式（默认只响应 @bot 消息）或 open 模式
+
+    【入站消息流】
+    on_message → _handle_discord_message → 权限校验 → 解析附件 →
+    提取回复上下文 → _handle_message → MessageBus → AgentLoop
+
+    【出站消息流】
+    AgentLoop → MessageBus → ChannelManager → send() → 2000 字分片 →
+    markdown 格式化为 Discord 兼容文本 → 逐个 chunk 发送
+    """
 
     name = "discord"
     display_name = "Discord"

@@ -1,7 +1,12 @@
-"""Workspace path boundary helpers.
+"""工作区路径边界辅助函数。
 
-These helpers are application-level guards.  They make path decisions
-consistent across tools, but they are not a replacement for an OS sandbox.
+【中文名称】工作区路径策略
+
+这组函数负责统一回答一个基础问题：
+“某个路径是否还在允许访问的工作区边界内？”
+
+它们属于应用层安全护栏，主要目的是让不同工具在做路径判断时口径一致。
+但要注意，它们不是操作系统级沙箱的替代品。
 """
 
 from __future__ import annotations
@@ -10,18 +15,18 @@ from pathlib import Path
 from typing import Iterable
 
 WORKSPACE_BOUNDARY_NOTE = (
-    " (this is a hard policy boundary, not a transient failure; "
-    "do not retry with shell tricks or alternative tools, and ask "
-    "the user how to proceed if the resource is genuinely required)"
+    "（这是一个明确的策略边界，不是临时性故障；"
+    "不要通过 shell 小技巧或其它工具绕过，"
+    "如果资源确实必须访问，应当向用户确认后再继续）"
 )
 
 
 class WorkspaceBoundaryError(PermissionError):
-    """Raised when a requested path escapes an allowed workspace boundary."""
+    """当请求路径越过允许访问的工作区边界时抛出。"""
 
 
 def resolve_path(path: str | Path, workspace: str | Path | None = None, *, strict: bool = False) -> Path:
-    """Resolve *path*, interpreting relative paths against *workspace* when set."""
+    """解析路径；如果给的是相对路径，则按工作区目录补全。"""
     candidate = Path(path).expanduser()
     if not candidate.is_absolute() and workspace is not None:
         candidate = Path(workspace).expanduser() / candidate
@@ -29,7 +34,7 @@ def resolve_path(path: str | Path, workspace: str | Path | None = None, *, stric
 
 
 def is_path_within(path: str | Path, root: str | Path) -> bool:
-    """Return True when *path* resolves to *root* or a descendant of *root*."""
+    """判断路径是否位于指定根目录内部。"""
     try:
         resolved_path = Path(path).expanduser().resolve(strict=False)
         resolved_root = Path(root).expanduser().resolve(strict=False)
@@ -40,7 +45,7 @@ def is_path_within(path: str | Path, root: str | Path) -> bool:
 
 
 def is_path_allowed(path: str | Path, roots: Iterable[str | Path]) -> bool:
-    """Return True when *path* is inside any allowed root."""
+    """判断路径是否落在任意一个允许根目录里。"""
     return any(is_path_within(path, root) for root in roots)
 
 
@@ -50,7 +55,7 @@ def require_path_within(
     *,
     message: str | None = None,
 ) -> Path:
-    """Resolve *path* and require it to be inside *root*."""
+    """解析路径，并强制要求它位于给定根目录内部。"""
     resolved = Path(path).expanduser().resolve(strict=False)
     if not is_path_within(resolved, root):
         raise WorkspaceBoundaryError(
@@ -69,7 +74,7 @@ def resolve_allowed_path(
     extra_allowed_roots: Iterable[str | Path] | None = None,
     strict: bool = False,
 ) -> Path:
-    """Resolve a path and enforce containment in allowed roots when configured."""
+    """解析路径，并在配置了允许根目录时执行边界校验。"""
     resolved = resolve_path(path, workspace, strict=False)
     if allowed_root is None:
         return resolve_path(path, workspace, strict=strict) if strict else resolved

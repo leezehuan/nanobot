@@ -829,20 +829,56 @@ class LLMProvider(ABC):
         should_retry_guard: Callable[[], bool] | None = None,
         on_stream_recover: Callable[[], Awaitable[None]] | None = None,
     ) -> LLMResponse:
+        """通用重试主循环。
+
+        【中文名称】带重试的 LLM 调用
+
+        【功能说明】
+        这是 Provider 层最重要的公共逻辑。它包装了 any callable（chat 或 chat_stream），
+        在遇到可恢复错误时自动重试。
+
+        【两种重试模式】
+        1. standard（默认）：最多重试 3 次，指数退避 1s → 2s → 4s
+        2. persistent：无限重试，但相同错误超过 10 次后停止；delay 上限 60s
+
+        【重试决策树】
+        1. 如果 response.finish_reason != "error" → 成功，直接返回
+        2. 如果有 should_retry_guard 且返回 False：
+           - 流式 timeout：尝试 stream_recover 或清空 delta 回调后重试
+           - 其他情况：跳过重试，直接返回错误
+        3. 如果不是临时错误 → 尝试去掉图片重试（有些 provider 因为图片被拒）
+        4. persistent 模式下相同错误超过 10 次 → 停止重试
+        5. standard 模式下超过 3 次 → 停止重试
+        6. 否则：计算延迟时间 → 执行心跳等待 → 重试
+
+        【retry-after 延迟来源（优先级从高到低）】
+        1. response.error_retry_after_s（结构化字段）
+        2. response.retry_after（结构化字段）
+        3. 从 response.content 文本中正则提取
+        4. 默认指数退避值
+
+        【心跳等待机制】
+        长时间等待会分段 sleep（每段 30s），在每段开始前通过 on_retry_wait
+        回调通知用户"模型请求失败，正在重试中"。
+
+        【参数说明】
+        - call: Callable → 要重试的实际调用函数（_safe_chat 或 _safe_chat_stream）
+        - kw: dict → 传给 call 的关键字参数字典
+        - original_messages: list[dict] → 原始消息（用于去图重试）
+        - retry_mode: str → "standard" 或 "persistent"
+        - on_retry_wait: callback → 重试等待时的进度通知回调
+        - should_retry_guard: callback → 返回 False 时跳过重试
+        - on_stream_recover: callback → 流式恢复回调
+
+        【返回值】
+        - LLMResponse: 最终响应（成功或失败）
+        """
         attempt = 0
         delays = list(self._CHAT_RETRY_DELAYS)
         persistent = retry_mode == "persistent"
         last_response: LLMResponse | None = None
         last_error_key: str | None = None
         identical_error_count = 0
-        """通用重试主循环。
-
-        这是 Provider 层非常重要的一段公共逻辑：
-        - 判断错误是否可重试
-        - 处理标准模式和 persistent 模式
-        - 支持 retry-after
-        - 在必要时做“去图片重试”这类恢复动作
-        """
         while True:
             attempt += 1
             response = await call(**kw)

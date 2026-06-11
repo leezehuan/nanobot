@@ -1,4 +1,22 @@
-"""CLI-Anything catalog, install state, and safe CLI execution."""
+"""CLI App 注册表、安装状态与安全执行服务。
+
+【中文名称】CLI 应用管理器
+
+这个模块比较像一个“小型应用市场 + 本地运行管理器”。
+它负责的不是普通 shell 命令执行，而是围绕 CLI App 建立一套更可控的流程：
+
+1. 从 CLI-Anything / nanobot-extension 注册表拉取应用目录；
+2. 记录本地安装状态；
+3. 为已安装 app 生成对应的技能文件；
+4. 按受支持的安装策略（pip / npm / brew / uv / bundled）执行安装和卸载；
+5. 在工作区内安全运行 CLI App；
+6. 自动扫描运行过程中产出的工件（图片、PDF、CSV 等）。
+
+【为什么要单独做这一层】
+
+因为直接让模型去写 shell 安装/执行第三方 CLI，风险太高，也不稳定。
+这层管理器的目标就是把“可安装、可发现、可运行”的路径收敛到可控接口里。
+"""
 
 from __future__ import annotations
 
@@ -76,7 +94,7 @@ _ARTIFACT_IGNORE_DIRS = frozenset({
 
 
 class CliAppError(ValueError):
-    """User-facing CLI Apps failure."""
+    """面向用户暴露的 CLI App 错误。"""
 
     def __init__(self, message: str, *, status: int = 400) -> None:
         super().__init__(message)
@@ -86,7 +104,7 @@ class CliAppError(ValueError):
 
 @dataclass(slots=True)
 class CliAppsRuntimeConfig:
-    """Runtime knobs for CLI Apps."""
+    """CLI App 运行时开关与超时配置。"""
 
     install_timeout: int = 300
     run_timeout: int = 60
@@ -198,19 +216,23 @@ _BRAND_TRAILING_WORDS = ("cli", "workflow", "workflows", "app", "apps", "tool", 
 
 
 def _now() -> float:
+    """返回当前时间戳（秒）。"""
     return time.time()
 
 
 def _safe_skill_name(name: str) -> str:
+    """把任意 app 名称转换成安全的技能目录名。"""
     clean = _SAFE_NAME_RE.sub("-", name.lower()).strip("-")
     return f"cli-app-{clean or 'app'}"
 
 
 def _has_shell_meta(command: str) -> bool:
+    """判断命令字符串里是否含有 shell 元字符。"""
     return any(char in command for char in _SHELL_META_CHARS)
 
 
 def _command_exists(command: str) -> bool:
+    """检查一条命令的可执行入口是否存在于 PATH。"""
     try:
         parts = shlex.split(command)
     except ValueError:
@@ -221,6 +243,7 @@ def _command_exists(command: str) -> bool:
 
 
 def _is_pip_install_command(command: str) -> bool:
+    """判断一条命令是否是受支持的 pip install 形式。"""
     try:
         tokens = shlex.split(command)
     except ValueError:
@@ -236,6 +259,7 @@ def _is_pip_install_command(command: str) -> bool:
 
 
 def _pip_uninstall_args_from_command(command: str) -> list[str] | None:
+    """从 `pip uninstall ...` 命令中提取纯包名参数。"""
     if not command or _has_shell_meta(command):
         return None
     try:
@@ -259,6 +283,7 @@ def _pip_uninstall_args_from_command(command: str) -> list[str] | None:
 
 
 def _console_script_distribution(entry_point: str) -> str | None:
+    """通过 console_script 反查它来自哪个 Python distribution。"""
     if not entry_point:
         return None
     try:
@@ -282,10 +307,12 @@ def _console_script_distribution(entry_point: str) -> str | None:
 
 
 def _brand_key(value: str) -> str:
+    """把品牌候选词规范化成查表用 key。"""
     return _SAFE_NAME_RE.sub("-", value.lower()).replace("_", "-").strip("-")
 
 
 def _brand_candidates(app: dict[str, Any]) -> list[str]:
+    """为一个 app 推导多个可能的品牌匹配候选词。"""
     values = [
         str(app.get("name") or ""),
         str(app.get("display_name") or ""),
@@ -306,6 +333,7 @@ def _brand_candidates(app: dict[str, Any]) -> list[str]:
 
 
 def _brand_payload(app: dict[str, Any]) -> tuple[str | None, str | None]:
+    """推断某个 app 应该显示什么 logo 和品牌色。"""
     declared_logo = str(app.get("logo_url") or "").strip()
     if declared_logo.startswith(("https://", "/")):
         declared_color = str(app.get("brand_color") or "").strip()
@@ -331,6 +359,7 @@ def _brand_payload(app: dict[str, Any]) -> tuple[str | None, str | None]:
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
+    """读取 JSON 文件；失败时返回 `None`。"""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -339,6 +368,7 @@ def _read_json(path: Path) -> dict[str, Any] | None:
 
 
 def _write_json(path: Path, data: dict[str, Any]) -> None:
+    """以原子替换方式写入 JSON 文件。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(data, indent=2, ensure_ascii=False)
     tmp_path = path.with_name(f".{path.name}.{os.getpid()}.{int(_now() * 1_000_000)}.tmp")
@@ -351,6 +381,7 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
 
 
 def _safe_skill_path(value: str) -> str | None:
+    """校验技能路径是否是安全的 `skills/.../SKILL.md` 形式。"""
     if not value.startswith("skills/"):
         return None
     parts = value.split("/")
@@ -360,6 +391,7 @@ def _safe_skill_path(value: str) -> str | None:
 
 
 def _skill_content_url(skill_md: str, *, raw_base: str = CLI_ANYTHING_RAW_BASE) -> str | None:
+    """把技能文件声明转换成允许访问的原始内容 URL。"""
     safe_path = _safe_skill_path(skill_md)
     if safe_path:
         return f"{raw_base.rstrip('/')}/{safe_path}"
@@ -374,6 +406,7 @@ def _skill_content_url(skill_md: str, *, raw_base: str = CLI_ANYTHING_RAW_BASE) 
 
 
 def _truncate(text: str, limit: int = _MAX_TOOL_OUTPUT_CHARS) -> str:
+    """截断过长文本，避免工具输出撑爆上下文。"""
     if len(text) <= limit:
         return text
     omitted = len(text) - limit
@@ -381,13 +414,22 @@ def _truncate(text: str, limit: int = _MAX_TOOL_OUTPUT_CHARS) -> str:
 
 
 def _catalog_description(app: dict[str, Any]) -> str:
-    """Return catalog copy without implying vendor endorsement."""
+    """返回去掉“官方背书”暗示词后的描述文案。"""
     description = str(app.get("description") or "")
     return _ENDORSEMENT_WORD_RE.sub("", description).strip()
 
 
 class CliAppManager:
-    """Manage CLI-Anything registry entries and local install state."""
+    """CLI App 的核心管理器。
+
+    你可以把它理解成围绕 CLI App 的统一服务入口，几乎所有高层动作都会落到这里：
+
+    - 查目录
+    - 看本地装了什么
+    - 安装 / 更新 / 卸载 / 测试
+    - 运行 CLI App
+    - 生成 skill 文件
+    """
 
     def __init__(
         self,
@@ -396,27 +438,32 @@ class CliAppManager:
         data_dir: Path | None = None,
         runtime: CliAppsRuntimeConfig | None = None,
     ) -> None:
+        """初始化管理器，并确定工作区、数据目录和运行时参数。"""
         self.workspace = Path(workspace).expanduser()
         self.data_dir = Path(data_dir) if data_dir is not None else get_runtime_subdir("cli-apps")
         self.runtime = runtime or CliAppsRuntimeConfig()
 
     @property
     def installed_path(self) -> Path:
+        """返回本地安装状态文件路径。"""
         return self.data_dir / "installed.json"
 
     def _cache_path(self, source: str) -> Path:
+        """返回某个注册表源对应的本地缓存文件路径。"""
         return self.data_dir / f"{source}_registry_cache.json"
 
     def _load_installed(self) -> dict[str, Any]:
+        """加载本地已安装 app 状态表。"""
         data = _read_json(self.installed_path) or {}
         apps = data.get("apps") if isinstance(data.get("apps"), dict) else data
         return apps if isinstance(apps, dict) else {}
 
     def _save_installed(self, installed: dict[str, Any]) -> None:
+        """保存本地已安装 app 状态表。"""
         _write_json(self.installed_path, {"schema_version": 1, "apps": installed})
 
     def installed_names(self) -> list[str]:
-        """Return registry names explicitly installed through CLI Apps."""
+        """返回通过 CLI Apps 明确登记安装的应用名列表。"""
         return sorted(str(name) for name in self._load_installed())
 
     def _fetch_registry(
@@ -426,6 +473,7 @@ class CliAppManager:
         *,
         force_refresh: bool = False,
     ) -> dict[str, Any]:
+        """获取一个注册表源的数据，优先使用 TTL 内缓存。"""
         cached = _read_json(cache_path)
         if (
             not force_refresh
@@ -451,6 +499,13 @@ class CliAppManager:
         return data
 
     def catalog(self, *, force_refresh: bool = False) -> tuple[list[dict[str, Any]], str | None]:
+        """聚合多个注册表源，返回统一后的 app 目录。
+
+        返回值：
+
+        - 第一个元素：去重合并后的 app 列表
+        - 第二个元素：这些注册表里最新的更新时间
+        """
         registries: list[tuple[str, str, dict[str, Any]]] = []
         for source, url, raw_base, required in _CATALOG_SOURCES:
             try:
@@ -489,15 +544,18 @@ class CliAppManager:
         return list(apps_by_name.values()), max(updated_values) if updated_values else None
 
     def _manifest_source(self, app: dict[str, Any]) -> str:
+        """把内部 source 标记转换成对外 manifest 使用的 source 字段。"""
         source = str(app.get("_source") or "harness")
         if source == "extensions":
             return "nanobot-extension"
         return f"cli-anything:{source}"
 
     def _trust_registry(self, app: dict[str, Any]) -> str:
+        """返回这个 app 对应的信任来源标签。"""
         return "nanobot-extension" if str(app.get("_source") or "") == "extensions" else "cli-anything"
 
     def get_app(self, name: str, *, force_refresh: bool = False) -> dict[str, Any]:
+        """按名称查找单个 app；找不到时抛 404 风格错误。"""
         wanted = name.lower()
         for app in self.catalog(force_refresh=force_refresh)[0]:
             if str(app.get("name", "")).lower() == wanted:
@@ -505,7 +563,7 @@ class CliAppManager:
         raise CliAppError(f"CLI app '{name}' not found", status=404)
 
     def mentioned_installed_apps(self, text: str) -> list[dict[str, str]]:
-        """Return installed CLI Apps referenced as ``@name`` in user text."""
+        """找出文本中以 `@name` 形式提到、且本地已安装的 CLI App。"""
         if "@" not in text:
             return []
         installed = self._load_installed()
@@ -536,6 +594,7 @@ class CliAppManager:
         return mentions
 
     def _strategy(self, app: dict[str, Any]) -> str:
+        """推断某个 app 应该使用哪种安装策略。"""
         package_manager = str(app.get("package_manager") or "").lower()
         install_strategy = str(app.get("install_strategy") or "").lower()
         if package_manager == "bundled" or install_strategy == "bundled":

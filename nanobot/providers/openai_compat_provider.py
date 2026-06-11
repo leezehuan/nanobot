@@ -337,6 +337,30 @@ def _merge_responses_extra_body(
 class OpenAICompatProvider(LLMProvider):
     """Unified provider for all OpenAI-compatible APIs.
 
+    【中文名称】OpenAI 兼容 Provider（统一适配器）
+
+    【功能说明】
+    这是 nanobot 里覆盖面最广的 Provider 实现。几乎所有走 OpenAI chat completions
+    格式的模型服务都走这一个类，包括：
+    - OpenAI 官方（GPT-4o、GPT-5、o1/o3/o4 系列）
+    - Azure OpenAI
+    - 第三方网关：OpenRouter、DeepSeek、Zhipu/GLM、Moonshot、MiniMax 等
+    - 本地模型服务：Ollama、vLLM、llama.cpp 等
+
+    【核心策略】
+    - chat completions 优先：绝大多数请求走 /v1/chat/completions
+    - Responses API 按需：GPT-5 / o 系列推理模型走 /v1/responses（更丰富的推理信息）
+    - 熔断保护：Responses API 连续失败 3 次后临时禁用 5 分钟
+    - 厂商适配：通过 ProviderSpec 配置文件 + 模型名匹配自动注入各家差异参数
+      （如 DeepSeek 的 reasoning_content 回填、Kimi 的 thinking_type、
+        MiMo 的 enable_thinking 等）
+
+    【关键内部状态】
+    - _spec: ProviderSpec → 定义 provider 的行为特征（thinking_style、strip_model_prefix 等）
+    - _extra_body: dict → 用户配置的额外请求体（可覆盖/扩展 thinking 参数）
+    - _responses_failures/_responses_tripped_at → Responses API 熔断器状态
+    - _is_local: bool → 是否本地端点（影响 keepalive 策略）
+
     Receives a resolved ``ProviderSpec`` from the caller — no internal
     registry lookups needed.
     """
@@ -508,7 +532,30 @@ class OpenAICompatProvider(LLMProvider):
         return dumped or "(empty)"
 
     def _sanitize_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """清洗消息：去掉非标准字段，并在需要时规范化 tool_call ID。"""
+        """清洗消息：去掉非标准字段，并在需要时规范化 tool_call ID。
+
+        【中文名称】消息清洗与规范化
+
+        【功能说明】
+        不同 OpenAI 兼容后台对消息格式的容忍度差异很大，此函数统一处理：
+
+        1. 去除非标准字段：只保留 role/content/tool_calls/tool_call_id/name/
+           reasoning_content/extra_content，其余字段丢弃
+        2. 工具调用 ID 规范化：
+           - Mistral 要求 9 字符 alphanumeric → SHA1 截断
+           - 去重检测：避免并行 tool_calls 中有重复 ID
+        3. 工具结果 ID 映射：确保 tool_result 的 tool_call_id 与其对应的
+           tool_call 的 ID 一致（跨消息追踪 pending_tool_ids）
+        4. old-style tool_calls：将工具调用中的 arguments 重新序列化为 JSON
+        5. DeepSeek 兼容：强制 content 为纯文本（不支持 content block 数组）
+        6. assistant 消息净化：tool_calls 存在时清除 content（部分网关拒绝混合）
+
+        【参数说明】
+        - messages: list[dict] → 原始消息列表
+
+        【返回值】
+        - list[dict] → 清洗后的消息列表，已通过 _enforce_role_alternation 校验
+        """
         sanitized = LLMProvider._sanitize_request_messages(messages, _ALLOWED_MSG_KEYS)
         id_map: dict[str, str] = {}
         pending_tool_ids: dict[str, deque[str]] = {}
@@ -619,6 +666,43 @@ class OpenAICompatProvider(LLMProvider):
         reasoning_effort: str | None,
         tool_choice: str | dict[str, Any] | None,
     ) -> dict[str, Any]:
+        """组装一次完整的 OpenAI chat.completions API 调用参数。
+
+        【中文名称】构建 API 请求参数
+
+        【功能说明】
+        这是 chat() 和 chat_stream() 共享的参数组装逻辑，将所有变量收敛为一个
+        统一的 kwargs dict。处理以下几个层面的差异：
+
+        1. 模型名规范化：根据 ProviderSpec.strip_model_prefix 决定是否去掉前缀
+        2. 消息清洗与重排：_sanitize_messages（去非标准字段 + tool_call ID 规范化
+           + role 交替校验）
+        3. token 参数：o1/o3/o4 和 GPT-5 必须用 max_completion_tokens
+        4. temperature 兼容：GPT-5 / o 系列的 reasoning 模式下不支持 temperature
+        5. 推理参数分发（key logic）：
+           - thinking 风格映射：通过 _THINKING_STYLE_MAP 把 "thinking_type" /
+             "enable_thinking" / "reasoning_split" 映射到各家厂商的具体 extra_body 形状
+           - 网关推理映射：DashScope / 其他网关的特殊 reasoning_effort →
+             reasoning.effort 转换
+           - Kimi 特殊处理：去除冗余的 reasoning_effort 字段（与 thinking_type 冲突）
+        6. DeepSeek 推理回填：reasioner 模式下自动补 reasoning_content="" 给每条
+           assistant 消息（否则 API 返回 400）
+        7. prompt caching：对 Anthropic 系模型注入 cache_control marker
+        8. extra_body 合并：用户配置的 extra_body 以深度合并方式覆盖，不会丢失
+           系统已设置的 thinking 参数
+
+        【参数说明】
+        - messages: 内部消息列表
+        - tools: 工具定义列表
+        - model: 模型名
+        - max_tokens: 最大输出 token
+        - temperature: 采样温度
+        - reasoning_effort: 推理力度
+        - tool_choice: 工具选择策略
+
+        【返回值】
+        - dict → 可直接解包传给 client.chat.completions.create(**kwargs) 的参数字典
+        """
         model_name = model or self.default_model
         spec = self._spec
 
@@ -969,6 +1053,32 @@ class OpenAICompatProvider(LLMProvider):
         return int(current or 0) if current is not None else 0
 
     def _parse(self, response: Any) -> LLMResponse:
+        """把 OpenAI API 的原始响应解析成统一的 LLMResponse。
+
+        【中文名称】响应解析
+
+        【功能说明】
+        同时兼容 dict 格式（raw JSON）和 Pydantic 对象格式（SDK 自动解析）的响应：
+
+        【处理流程 —— 3 条路径】
+        Path A —— response 是纯字符串：直接返回 LLMResponse(content=string)
+
+        Path B —— response 是 dict（raw JSON）：
+          1. 从 choices[0].message 提取 content
+          2. 遍历所有 choice 的 tool_calls（支持 parallel tool calls）
+          3. 解析每个 tool_call：id + function.name + function.arguments
+          4. 提取扩展字段（extra_content/provider_specific_fields）
+          5. 提取 reasoning_content（reasoning 字段作为备选，支持 StepFun）
+
+        Path C —— response 是 Pydantic 对象（SDK 模式）：
+          同 Path B 但通过属性访问而非字典 key
+
+        【参数说明】
+        - response: Any → OpenAI SDK 返回的原始响应对象
+
+        【返回值】
+        - LLMResponse → 统一格式的 LLM 响应结构体
+        """
         if isinstance(response, str):
             return LLMResponse(content=response, finish_reason="stop")
 
@@ -1086,6 +1196,29 @@ class OpenAICompatProvider(LLMProvider):
 
     @classmethod
     def _parse_chunks(cls, chunks: list[Any]) -> LLMResponse:
+        """把流式响应的 chunk 列表合并解析成统一的 LLMResponse。
+
+        【中文名称】流式响应合并解析
+
+        【功能说明】
+        流式请求先将所有 SSE chunk 收集到列表中，流结束后调用此函数一次性解析。
+        之所以不走 OpenAI SDK 的 stream 自动合并，是因为：
+        - 某些厂商的 SDK 合并行为不一致
+        - 需要在合并过程中做 ID 去重（如 Zhipu/GLM 的 parallel tool calls 复用 ID）
+        - 需要无损保留 extra_content 等扩展字段
+
+        【核心逻辑】
+        1. 遍历所有 chunk，按 index 分组累积 tool_call 片段
+        2. 同时累积 content + reasoning_content 文本
+        3. 检测 ID 重复并自动生成新 ID
+        4. 兼容旧式 function_call 格式
+
+        【参数说明】
+        - chunks: list[Any] → 流式响应收集的所有 chunk
+
+        【返回值】
+        - LLMResponse → 合并后的完整响应
+        """
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
         tc_bufs: dict[int, dict[str, Any]] = {}
@@ -1310,6 +1443,40 @@ class OpenAICompatProvider(LLMProvider):
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
     ) -> LLMResponse:
+        """发送非流式对话请求。
+
+        【中文名称】非流式对话
+
+        【功能说明】
+        OpenAI Compat Provider 的同步调用入口。一次完整调用流程：
+
+        1. _ensure_client()：懒初始化 OpenAI SDK client（首次调用时才创建）
+        2. _should_use_responses_api()：判断是否走 Responses API——
+           - 仅 OpenAI 官方 / GitHub Copilot 且模型是 GPT-5 / o 系列时使用
+           - 受熔断器保护（连续失败 3 次后禁用 5 分钟）
+        3. Responses API 路径：
+           - _build_responses_body 组装参数
+           - parse_response_output 解析结果
+           - 失败时：400/404/422 且错误消息含兼容性标记 → fallback 到 chat.completions
+           - 其他错误 → 记录失败次数，触发熔断器
+        4. Chat Completions 路径：
+           - _build_kwargs 组装参数（含消息清洗 + 厂商适配）
+           - 调用 client.chat.completions.create
+           - _parse 解析响应
+        5. 异常统一走 _handle_error 转换为 LLMResponse
+
+        【参数说明】
+        - messages: 消息历史列表
+        - tools: 工具定义列表（可选）
+        - model: 模型名（可选，默认使用 default_model）
+        - max_tokens: 最大输出 token（默认 4096）
+        - temperature: 采样温度（默认 0.7）
+        - reasoning_effort: 推理力度
+        - tool_choice: 工具选择策略
+
+        【返回值】
+        - LLMResponse → 统一格式的 LLM 响应结构体
+        """
         await self._ensure_client()
         try:
             if self._should_use_responses_api(model, reasoning_effort):
@@ -1354,6 +1521,51 @@ class OpenAICompatProvider(LLMProvider):
         on_thinking_delta: Callable[[str], Awaitable[None]] | None = None,
         on_tool_call_delta: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> LLMResponse:
+        """发送流式对话请求。
+
+        【中文名称】流式对话
+
+        【功能说明】
+        OpenAI Compat Provider 的流式调用入口。与 chat() 不同之处：
+
+        【流式处理流程】
+        Phase 1 —— 客户端就位：_ensure_client() 懒初始化 SDK client
+
+        Phase 2 —— Responses API 流式路径（GPT-5 / o 系列）：
+          1. _build_responses_body(stream=True)
+          2. consume_sdk_stream 消费 SSE 流，期间实时回调 on_content_delta + on_tool_call_delta
+          3. 失败策略同 chat()
+          4. 直接由 consume_sdk_stream 返回合并好的 content + tool_calls
+
+        Phase 3 —— Chat Completions 流式路径（大多数情况）：
+          1. _build_kwargs(stream=True, stream_options=include_usage)
+          2. 利用 asyncio.wait_for + idle_timeout 做流空闲保护（默认 90s）
+          3. 逐 chunk 遍历：
+             - delta.content → on_content_delta 回调（用于打字机效果）
+             - delta.reasoning → on_thinking_delta 回调
+             - delta.tool_calls → on_tool_call_delta 回调（用于实时文件编辑预览）
+          4. 所有 chunk 累积到列表中
+          5. 流结束后 _parse_chunks 合并解析（含 ID 去重）
+
+        Phase 4 —— 异常处理：
+          - asyncio.TimeoutError → 流空闲超时，返回错误 LLMResponse
+          - 其他异常 → _handle_error 统一转换
+
+        【参数说明】
+        - messages: 消息历史列表
+        - tools: 工具定义列表（可选）
+        - model: 模型名
+        - max_tokens: 最大输出 token
+        - temperature: 采样温度
+        - reasoning_effort: 推理力度
+        - tool_choice: 工具选择策略
+        - on_content_delta: 文本增量回调
+        - on_thinking_delta: 思考增量回调
+        - on_tool_call_delta: 工具调用增量回调
+
+        【返回值】
+        - LLMResponse → 统一格式的 LLM 响应结构体
+        """
         await self._ensure_client()
         idle_timeout_s = int(os.environ.get("NANOBOT_STREAM_IDLE_TIMEOUT_S", "90"))
         try:

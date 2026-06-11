@@ -147,7 +147,12 @@ class QQConfig(Base):
 
 
 class QQChannel(BaseChannel):
-    """QQ channel using botpy SDK with WebSocket connection."""
+    """【中文名称】QQ 频道适配器
+
+    基于 botpy SDK 的 WebSocket 连接接入 QQ 平台。
+    支持 QQ 频道（guild）和私聊消息，支持 C2C 和 GROUP 场景。
+
+    QQ channel using botpy SDK with WebSocket connection."""
 
     name = "qq"
     display_name = "QQ"

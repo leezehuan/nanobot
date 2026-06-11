@@ -133,6 +133,14 @@ class WeixinConfig(Base):
 
 class WeixinChannel(BaseChannel):
     """
+    【中文名称】个人微信渠道适配器
+
+    【功能说明】
+    通过 HTTP 长轮询（long-poll）接入微信个人号，使用 ilinkai.weixin.qq.com API。
+    扫码登录后获取 bot token，支持接收和发送个人微信消息。
+
+    注意：这不是企业微信（WeCom）或微信公众号——而是个人微信的"机器人"接入方式。
+
     Personal WeChat channel using HTTP long-poll.
 
     Connects to ilinkai.weixin.qq.com API to receive and send personal

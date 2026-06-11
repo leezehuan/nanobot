@@ -31,8 +31,35 @@ def strip_think(text: str) -> str:
     template leaks occasionally emitted by some models (notably Gemma 4's
     Ollama renderer).
 
+    【中文名称】清理 thinking 标签泄漏
+
+    【功能说明】
+    部分模型（如 Gemma 4 在 Ollama 上运行时）会在输出中泄漏内部的 reasoning
+    标签模板。这个函数负责把所有形式的泄漏标签清理干净，确保用户看到的文本
+    不包含底层推理标记。
+
+    【处理的 6 类泄漏】
+    1. 完整闭合块：` thinking... response` 和 `<thought>...</thought>`
+    2. 流式中途断开的 opening tag（从未闭合）
+    3. 坏掉的 opening tag：如 `<think广场...`（标签后缺少 `>`，模型直接把
+       中文内容粘在后面输出）
+    4. Harmony 风格 channel marker：`<channel|>` / `<|channel|>`（仅清理文首）
+    5. 孤儿 closing tag：` response` / `</thought>`（仅清理文首/文尾，
+       不碰正文中讨论这些标签的正当内容）
+    6. 流式分片残片：如 `</thi`, `</thin`, `<|ch` 等（仅清理文尾）
+
+    # 由于 strip_think 也会在写入历史前调用（memory.py），
+    # (4)(5) 仅在边缘清理是刻意设计——如果在正文中间也清理，
+    # 就会错误地修改用户/助手讨论这些标签本身的合法消息。
+
+    【参数说明】
+    - text: str → 需要清理的原始文本
+
+    【返回值】
+    - str → 清理后的纯文本
+
     Covers:
-      1. Well-formed `<think>...</think>` and `<thought>...</thought>` blocks.
+      1. Well-formed ` thinking... response` and `<thought>...</thought>` blocks.
       2. Streaming prefixes where the block is never closed.
       3. *Malformed* opening tags missing the `>` — e.g. `<think广场…`. The
          model sometimes emits the tag name directly followed by user-facing
@@ -41,7 +68,7 @@ def strip_think(text: str) -> str:
       4. Harmony-style channel markers like `<channel|>` / `<|channel|>`
          **at the start of the text** — conservative to avoid eating
          explanatory prose that mentions these tokens.
-      5. Orphan closing tags `</think>` / `</thought>` **at the very start
+      5. Orphan closing tags ` response` / `</thought>` **at the very start
          or end of the text** only, for the same reason.
       6. Trailing partial control tags split across stream chunks, such as
          `<thi`, `<thin`, or `<tho`.
@@ -312,7 +339,35 @@ def maybe_persist_tool_result(
     *,
     max_chars: int,
 ) -> Any:
-    """把超长工具输出落盘，并用稳定引用文本替换原始内容。"""
+    """把超长工具输出落盘，并用稳定引用文本替换原始内容。
+
+    【中文名称】超长工具输出落盘
+
+    【功能说明】
+    当工具调用返回的结果超过 max_chars 字符时，直接把它塞进 LLM 上下文
+    会浪费大量 token，还可能撑爆 context window。此函数做三件事：
+
+    1. 判断是否需要落盘：内容长度 > max_chars 时才处理
+    2. 写入文件：保存在 workspace/.nanobot/tool-results/{session_key}/{tool_call_id}.txt
+       （或 .json，取决于内容是否 list 格式）
+    3. 生成引用文本：返回一段短的"预览 + 文件路径"文本，
+       代替原始超长内容送入 LLM 上下文
+
+    【清理策略】
+    - 每个 session 最多保留 32 个 bucket 目录
+    - 超过 7 天的旧 bucket 自动删除
+    - 使用原子写入（.tmp → replace），避免读到半写入文件
+
+    【参数说明】
+    - workspace: Path | None → 工作区根目录（None 时不做落盘）
+    - session_key: str | None → 会话标识（用于分目录存储）
+    - tool_call_id: str → 工具调用的唯一 ID
+    - content: Any → 工具返回的原始内容（str 或 list 格式）
+    - max_chars: int → 保留在上下文中的最大字符数
+
+    【返回值】
+    - Any → 如果未超长则返回原始 content，否则返回引用文本
+    """
     if workspace is None or max_chars <= 0:
         return content
 
@@ -357,12 +412,24 @@ def split_message(content: str, max_len: int = 2000) -> list[str]:
     """
     Split content into chunks within max_len, preferring line breaks.
 
-    Args:
-        content: The text content to split.
-        max_len: Maximum length per chunk (default 2000 for Discord compatibility).
+    【中文名称】消息分片
 
-    Returns:
-        List of message chunks, each within max_len.
+    【功能说明】
+    将超长文本按指定长度切分为多个片段。优先在换行符处切分，
+    其次在空格处，实在找不到才硬截断。常用于 Telegram（4000 字限制）
+    和 Discord（2000 字限制）的消息发送。
+
+    【分片策略】
+    1. 如果文本长度 <= max_len，直接返回原文本
+    2. 否则：取前 max_len 字符，从后往前找换行符 → 空格 → 硬截断
+    3. 切剩下的部分继续循环处理
+
+    【参数说明】
+    - content: str → 待切分的文本
+    - max_len: int → 每个分片的最大长度（默认 2000）
+
+    【返回值】
+    - list[str] → 分片后的消息列表
     """
     if not content:
         return []
@@ -391,7 +458,26 @@ def build_assistant_message(
     reasoning_content: str | None = None,
     thinking_blocks: list[dict] | None = None,
 ) -> dict[str, Any]:
-    """构造一条对各类 Provider 更安全的 assistant 消息。"""
+    """构造一条对各类 Provider 更安全的 assistant 消息。
+
+    【中文名称】构造 assistant 消息
+
+    【功能说明】
+    所有 Provider 写入历史时都应通过这个函数来构造 assistant 消息。
+    它保证消息结构是各 Provider 都能接受的格式，特别是：
+    - content 不为 None（至少设为空字符串）
+    - reasoning_content 明确设为 "" 而非省略（DeepSeek 等推理模型需要）
+    - thinking_blocks 保留 Anthropic 思考过程（用于回放和下一次对话）
+
+    【参数说明】
+    - content: str | None → 回复文本
+    - tool_calls: list | None → 工具调用列表
+    - reasoning_content: str | None → 推理内容
+    - thinking_blocks: list | None → Anthropic 思考块
+
+    【返回值】
+    - dict → 标准格式的 assistant 消息
+    """
     msg: dict[str, Any] = {"role": "assistant", "content": content or ""}
     if tool_calls:
         msg["tool_calls"] = tool_calls
@@ -406,7 +492,26 @@ def estimate_prompt_tokens(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None = None,
 ) -> int:
-    """使用 tiktoken 粗略估算一组消息会占多少 prompt token。"""
+    """使用 tiktoken 粗略估算一组消息会占多少 prompt token。
+
+    【中文名称】Prompt Token 估算
+
+    【功能说明】
+    在 context compaction（上下文压缩）决策中使用。遍历所有消息，
+    收集所有文本内容（content / reasoning_content / tool_calls / name 等），
+    拼接后用 cl100k_base 编码器计算 token 数量。
+
+    【注意】
+    这是粗略估算，不包含各 Provider 的消息格式开销（如 role 标记、特殊 token 等）。
+    真正的精确计数需要走 Provider 自己的 tokenizer。此处仅用于预判"是否需要压缩"。
+
+    【参数说明】
+    - messages: 消息历史列表
+    - tools: 工具定义列表（可选，也会计入 token 估算）
+
+    【返回值】
+    - int → 估算的 token 数量（失败时返回 0）
+    """
     try:
         enc = tiktoken.get_encoding("cl100k_base")
         parts: list[str] = []
@@ -487,7 +592,24 @@ def estimate_prompt_tokens_chain(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None = None,
 ) -> tuple[int, str]:
-    """优先走 Provider 自带计数器，否则回退到 tiktoken 估算。"""
+    """优先走 Provider 自带计数器，否则回退到 tiktoken 估算。
+
+    【中文名称】Token 估算（链式优先级）
+
+    【功能说明】
+    上下文压缩时优先使用 Provider 自身的精确计数方法，
+    只有 Provider 不支持时才回退到通用的 tiktoken 估算。
+    这样可以获得更准确的 token 计数（如 Anthropic 的 prompt caching 补偿）。
+
+    【参数说明】
+    - provider: Provider 对象（检查是否有 estimate_prompt_tokens 方法）
+    - model: 当前使用的模型名
+    - messages: 消息历史
+    - tools: 工具定义
+
+    【返回值】
+    - (token_count, source) 元组 → source 为 "provider_counter" 或 "tiktoken" 或 "none"
+    """
     provider_counter = getattr(provider, "estimate_prompt_tokens", None)
     if callable(provider_counter):
         with suppress(Exception):

@@ -272,7 +272,27 @@ class AgentRunner:
         return injected_messages
 
     async def run(self, spec: AgentRunSpec) -> AgentRunResult:
-        """AgentRunner 对外总入口。"""
+        """AgentRunner 对外总入口。
+
+        【中文名称】运行 Agent 回合
+
+        【功能说明】
+        这是 AgentRunner 层的唯一外部调用接口。它负责：
+        1. 注册 AgentHook 生命周期回调（before_run → _run_core → after_run）
+        2. 在 _run_core() 中执行真正的"模型↔工具"多轮对话循环
+        3. 把中间消息状态通过 context 同步给 hook，供外部 debug/监控
+
+        【Hook 生命周期】
+        before_run() → _run_core() → after_run() → on_finally()
+        异常路径：before_run() → on_error() → on_finally()
+        Cancel 路径：before_run() → on_finally()
+
+        【参数说明】
+        - spec: AgentRunSpec → 一次执行所需的完整配置（模型、工具、token 预算等）
+
+        【返回值】
+        - AgentRunResult: 包含 final_content / messages / tools_used / usage / stop_reason
+        """
         hook = spec.hook or AgentHook()
         messages = list(spec.initial_messages)
         context = AgentRunHookContext(messages=deepcopy(messages))
@@ -326,16 +346,50 @@ class AgentRunner:
         hook: AgentHook,
         messages: list[dict[str, Any]],
     ) -> AgentRunResult:
-        """核心执行循环。
+        """核心执行循环：这是项目里最关键的"模型-工具多轮对话循环"。
 
-        这是项目里最关键的“模型-工具多轮对话循环”之一。
-        每一轮 iteration 的主线通常是：
+        【中文名称】核心执行循环
 
-        1. 清理/裁剪 messages_for_model
-        2. 向模型发请求
-        3. 如果模型要求调工具，就执行工具并把结果写回消息链
-        4. 如果模型给出最终文本，就结束
-        5. 如果中途有新消息注入，就继续下一轮
+        【功能说明】
+        每一次 iteration 的主线是：
+        1. 清理/裁剪 messages（去孤儿 tool result、回填空洞、微压缩、token 裁剪）
+        2. 向模型发送请求（自动选择流式/非流式/进度流式三种模式）
+        3. 模型返回后，进入两大分支：
+           - 分支 A（should_execute_tools）：执行工具，把结果写回消息链，继续下一轮
+           - 分支 B（有文本回答）：检查是否可以结束，处理空回复/长度截断/中途注入
+        4. 每次工具执行后或回答前，都是"检查是否有新消息注入"的天然时机
+        5. 如果 for...else（迭代次数耗尽），做最后一次收尾并退出
+
+        【分支 A：执行工具（tool loop）】
+        1. 把 assistant 的 tool_call 声明写入 messages
+        2. 调用 _execute_tools() 执行所有工具（支持并发）
+        3. 每个工具结果包装成 role=tool 消息追加到 messages
+        4. 如果工具执行遇到 fatal error，构造错误文本并退出
+        5. 工具执行后检查 pending_queue 是否有中途注入消息
+        6. continue 下一轮迭代
+
+        【分支 B：给出回答（final response）】
+        1. 检查回答是否为空 → 有限次数重试
+        2. 检查是否因长度截断 → 有限次数续写恢复
+        3. 检查是否有中途注入消息（包括 sustained goal continuation）
+        4. 如果以上都不触发，则正常结束（break）
+        5. 如果触发了中途注入，则 continue 继续
+
+        【上下文裁剪管线（每轮开头执行）】
+        _drop_orphan_tool_results → 去掉没有前置 tool_call 声明的孤儿 tool result
+        _backfill_missing_tool_results → 为缺失的 tool result 回填空洞占位
+        _microcompact → 压缩超大 tool 结果，避免浪费上下文
+        _apply_tool_result_budget → 按字符数限制工具结果长度
+        _snip_history → 如果消息总 token 接近窗口上限，从头部裁剪
+        再次 _drop_orphan_tool_results + _backfill → 裁剪可能制造新孤儿，再清一次
+
+        【参数说明】
+        - spec: AgentRunSpec → 运行规格（模型、工具、token 预算、回调）
+        - hook: AgentHook → 生命周期钩子（进度、流式、错误回调）
+        - messages: list[dict] → 当前消息链，会被就地修改（append tool results / assistant messages）
+
+        【返回值】
+        - AgentRunResult: 包含 final_content / messages / tools_used / usage / stop_reason / had_injections
         """
         final_content: str | None = None
         tools_used: list[str] = []

@@ -1,6 +1,13 @@
-"""On-demand version checker for nanobot-ai releases.
+"""按需检查 `nanobot-ai` 是否有新版本。
 
-Checks PyPI for newer versions when explicitly requested (no background polling).
+【中文名称】版本更新检查器
+
+这个模块不会后台轮询，也不会偷偷常驻请求网络。
+只有在显式调用时，它才会去 PyPI 看看：
+
+- 当前本地版本是多少
+- PyPI 最新版本是多少
+- 是否值得提示用户升级
 """
 
 from __future__ import annotations
@@ -22,10 +29,14 @@ _cache: tuple[float, str | None] = (0.0, None)
 
 
 def check_for_update() -> dict[str, Any] | None:
-    """Check PyPI for a newer version. Returns update info dict or None if up-to-date.
+    """检查 PyPI 是否存在比当前版本更高的新版本。
 
-    Uses a short cache to avoid repeated requests within the TTL window.
-    This is a blocking call — invoke from a thread or background task.
+    返回：
+
+    - `dict`：存在新版本时，返回当前版本、最新版本和 PyPI 地址
+    - `None`：已经是最新版本，或者检查失败
+
+    这里用了短 TTL 缓存，避免前端频繁点击时反复打 PyPI。
     """
     global _cache
     now = time.monotonic()

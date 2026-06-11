@@ -1,4 +1,17 @@
-"""Composition helpers for the embedded WebUI gateway."""
+"""嵌入式 WebUI 网关的服务装配器。
+
+【中文名称】网关服务拼装层
+
+这个模块本身不处理 HTTP 请求，也不直接处理 WebSocket 消息。
+它做的是“依赖注入”工作：把 WebUI 网关运行所需的一组服务对象组装好，
+再一次性返回给上层。
+
+这样做的好处是：
+
+- 网关启动代码更清爽；
+- 各个服务的职责边界更清楚；
+- 测试时也更容易替换单个依赖。
+"""
 
 from __future__ import annotations
 
@@ -17,7 +30,7 @@ from nanobot.webui.ws_http import GatewayHTTPHandler
 
 @dataclass(frozen=True)
 class GatewayServices:
-    """Explicit dependencies shared by WebSocket transport and HTTP routes."""
+    """WebUI 网关需要共享的一组明确依赖。"""
 
     http: GatewayHTTPHandler
     tokens: GatewayTokenStore
@@ -43,6 +56,16 @@ def build_gateway_services(
     cron_service: Any | None = None,
     logger: Any = default_logger,
 ) -> GatewayServices:
+    """构建一整套 WebUI 网关运行时服务。
+
+    可以把这个函数理解成“后端网关的装配工厂”：
+
+    - token 服务负责鉴权票据
+    - media 服务负责媒体签名和改写
+    - transcript 服务负责会话文本记录
+    - workspaces 服务负责工作区访问策略
+    - http 服务负责真正的 HTTP / WS 路由处理
+    """
     tokens = GatewayTokenStore()
     media = WebUIMediaGateway(
         workspace_path=workspace_path,

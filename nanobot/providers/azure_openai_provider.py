@@ -63,7 +63,17 @@ class _AzureTokenProvider:
 
 
 class AzureOpenAIProvider(LLMProvider):
-    """基于 Azure Responses API 的 Azure OpenAI Provider。"""
+    """【中文名称】Azure OpenAI Provider
+
+    【功能说明】
+    基于 Azure Responses API 调用 Azure 托管的 OpenAI 模型。复用 OpenAI SDK，
+    但将 base_url 指向 Azure 的 ``https://{endpoint}/openai/v1/`` 格式。
+
+    支持两种认证模式：
+    1. 传统 API Key
+    2. Microsoft Entra ID（AAD）动态换取 bearer token（通过 _AzureTokenProvider）
+
+    基于 Azure Responses API 的 Azure OpenAI Provider。"""
 
     def __init__(
         self,

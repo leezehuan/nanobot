@@ -331,6 +331,16 @@ class SignalConfig(Base):
 
 class SignalChannel(BaseChannel):
     """
+    【中文名称】Signal 渠道适配器
+
+    【功能说明】
+    通过 signal-cli daemon 的 HTTP JSON-RPC 接口接入 Signal 端到端加密通讯。
+    signal-cli 扮演桥接角色——npm cli 以 daemon 模式运行，
+    nanobot 通过 HTTP 调用其 JSON-RPC 接口收发消息。
+
+    【前置条件】
+    signal-cli -a +1234567890 daemon --http localhost:8080
+
     Signal channel using signal-cli daemon via HTTP JSON-RPC interface.
 
     Requires signal-cli daemon in HTTP mode:

@@ -874,7 +874,38 @@ class AgentLoop:
         return result.final_content, result.tools_used, result.messages, result.stop_reason, result.had_injections
 
     async def run(self) -> None:
-        """运行 Agent 主循环，并把消息分发成任务以保持对 ``/stop`` 的响应性。"""
+        """运行 Agent 主循环，并把消息分发成任务以保持对 ``/stop`` 的响应性。
+
+        【中文名称】运行 Agent 主循环
+
+        【功能说明】
+        这是整个 AgentLoop 的最外层入口，也是 nanobot 启动后的"主心跳"。
+        它会无限循环地从 MessageBus 的 inbound 队列消费消息，然后创建 asyncio.Task
+        去异步处理。之所以不直接在这里同步处理，是为了让循环始终保持响应，
+        不会被某个慢回合阻塞住（例如期间可以接收 /stop 命令）。
+
+        【完整生命周期】
+        1. 连接 MCP 服务器 → 让外部工具能够在后续回合中被调用
+        2. 进入 while self._running 无限循环
+        3. 每次循环从 bus.inbound 取一条消息（1 秒超时）
+        4. 超时期间检查是否有闲置会话需要自动压缩（AutoCompact）
+        5. 收到消息后，先判断是否是运行时控制消息 → 是则直接处理并跳过
+        6. 判断是否是高优先级命令 → 是则内联 dispatch 并跳过
+        7. 如果该 session 已有活跃任务，把新消息放入 pending_queue（中途注入）
+        8. 否则创建 asyncio.Task 异步执行 _dispatch()
+        9. 记录活跃任务，方便 /stop 指令找到对应的 Task 并取消
+
+        【任务调度】
+        - 同一 session_key 内的消息通过 asyncio.Lock 串行化处理
+        - 不同 session 之间通过 Semaphore（默认 3）限制并发数
+        - 被 /stop 取消的任务会尽量恢复 checkpoint 保护已完成的工具结果
+
+        【参数说明】
+        无参数 —— 这是协程入口，所有配置都在 __init__ 时注入。
+
+        【返回值】
+        无返回值 —— 这是一个常驻协程，进程退出时才会结束。
+        """
         self._running = True
         await self._connect_mcp()
         logger.info("Agent loop started")
@@ -951,7 +982,44 @@ class AgentLoop:
             )
 
     async def _dispatch(self, msg: InboundMessage) -> None:
-        """处理一条消息：同 session 串行，不同 session 可并发。"""
+        """处理一条消息：同 session 串行，不同 session 可并发。
+
+        【中文名称】消息分发处理器
+
+        【功能说明】
+        这是 AgentLoop 中每个异步 Task 的入口函数。它负责：
+        - 用 asyncio.Lock 保证同一 session 内的消息串行处理
+        - 用 asyncio.Semaphore 限制总并发 Task 数
+        - 为当前回合注册 pending_queue（中途消息注入队列）
+        - 管理流式输出回调（on_stream / on_stream_end）
+        - 处理回合完成/异常后的清理和事件发布
+
+        【并发控制两层】
+        1. lock = asyncio.Lock（session 级别）→ 同一会话内严格串行
+        2. gate = asyncio.Semaphore（全局级别）→ 控制同时运行的 Task 总数
+        只有同时拿到 lock 和 gate 的 Task 才能真正开始处理回合。
+
+        【pending_queue 机制】
+        持有锁的 Task 会创建一个 asyncio.Queue(maxsize=20) 作为本回合的
+        中途注入队列。后续到达的同一 session 消息不进新建 Task，
+        而是 put 到这个队列里，由当前回合在合适时机（工具执行后、回答前）消费。
+
+        【异常处理】
+        - asyncio.CancelledError：恢复 checkpoint 保护已完成的工具结果
+        - 普通 Exception：发布 "Sorry, I encountered an error." 回渠道
+
+        【流式输出回调】
+        如果消息 metadata 中含 _wants_stream，则构造 on_stream / on_stream_end
+        回调，把 LLM 的增量输出分段发送到消息总线。
+        Stream ID 格式为 {session_key}:{timestamp_ns}:{segment_index}，
+        这样渠道端可以根据 stream_id 区分不同的流段落。
+
+        【参数说明】
+        - msg: InboundMessage → 要处理的入站消息
+
+        【返回值】
+        无返回值 —— 结果通过 bus.publish_outbound() 发布到消息总线
+        """
         session_key = self._effective_session_key(msg)
         if session_key != msg.session_key:
             msg = dataclasses.replace(msg, session_key_override=session_key)
@@ -1225,7 +1293,50 @@ class AgentLoop:
         ephemeral: bool = False,
         tools: ToolRegistry | None = None,
     ) -> OutboundMessage | None:
-        """按状态机完整处理一条入站消息。"""
+        """按状态机完整处理一条入站消息，逐步走完 7 个阶段。
+
+        【中文名称】按状态机处理消息
+
+        【功能说明】
+        这是 AgentLoop 处理单条用户消息的"总编排函数"。它不直接调用 LLM，
+        而是通过 TurnContext 状态机逐个阶段推进：恢复 → 压缩 → 命令 →
+        构建 → 运行 → 保存 → 响应。每个阶段由 _state_* 方法实现。
+
+        【完整的 7 个处理阶段】
+        Phase 1: RESTORE（恢复） → 加载 session、恢复 checkpoint、发出事件
+        Phase 2: COMPACT（压缩） → 检查是否需要自动压缩闲置会话
+        Phase 3: COMMAND（命令） → 尝试匹配内置斜杠命令（/new, /stop 等）
+        Phase 4: BUILD（构建） → 拼接 system prompt + history → 构建 messages
+        Phase 5: RUN（运行）    → 调用 AgentRunner 执行"模型↔工具"循环
+        Phase 6: SAVE（保存）   → 将本轮新增消息写入 Session 并持久化
+        Phase 7: RESPOND（响应）→ 组装 OutboundMessage 返回给调用方
+
+        【状态转移表（self._TRANSITIONS）】
+        RESTORE + "ok"     → COMPACT
+        COMPACT + "ok"     → COMMAND
+        COMMAND + "dispatch" → BUILD（普通消息）
+        COMMAND + "shortcut" → DONE（快捷命令，跳过 LLM）
+        BUILD   + "ok"     → RUN
+        RUN     + "ok"     → SAVE
+        SAVE    + "ok"     → RESPOND
+        RESPOND + "ok"     → DONE
+
+        【TurnContext 的作用】
+        各个状态处理函数不会互相直接传参，而是通过 TurnContext 这个共享上下文对象
+        来读写中间结果（session、history、final_content 等）。
+
+        【参数说明】
+        - msg: InboundMessage → 要处理的入站消息
+        - session_key: str | None → 会话唯一键（为 None 时用 msg.session_key）
+        - on_progress: callback → 工具执行进度回调
+        - on_stream: callback → 流式增量输出回调
+        - on_stream_end: callback → 流式输出结束回调
+        - pending_queue: Queue | None → 中途消息注入队列
+        - ephemeral: bool → 是否为临时轮次（不保存历史）
+
+        【返回值】
+        - OutboundMessage | None: 组装好的出站消息；被 MessageTool 消费或命令抑制时返回 None
+        """
         self._refresh_provider_snapshot()
 
         if msg.channel == "system":
