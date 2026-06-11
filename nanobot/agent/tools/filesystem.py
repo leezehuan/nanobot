@@ -130,7 +130,7 @@ def _is_blocked_device(path: str | Path) -> bool:
     import re
     raw = str(path)
 
-    # Resolve symlinks to check the actual target
+    # 先解析符号链接，避免用户表面上访问普通路径，实际却跳到设备文件。
     try:
         resolved = str(Path(raw).resolve())
     except (OSError, ValueError):
@@ -143,7 +143,7 @@ def _is_blocked_device(path: str | Path) -> bool:
     if re.match(r"/proc/\d+/fd/[012]$", resolved) or re.match(r"/proc/self/fd/[012]$", resolved):
         return True
 
-    # Check if resolved path starts with /dev/ (covers symlinks to devices)
+    # 如果解析后的真实路径落在 /dev/ 下，也一律视为设备文件并拦截。
     if resolved.startswith("/dev/"):
         return True
     return False
@@ -281,7 +281,7 @@ class ReadFileTool(_FsTool):
                     # 文件被外部改过：本次强制完整重读，并暂时禁用 dedup。
                     entry.can_dedup = False
                     self._file_states.record_read(fp, offset=offset, limit=limit)  # Update state with new mtime
-                    # Continue to read full content (don't return dedup message)
+                    # 继续完整读取内容；这里不能直接返回“文件未变化”的去重提示。
                 else:
                     # 文件看起来没变，但还要进一步比对内容哈希，防止 mtime 没更新。
                     current_hash = _hash_file(str(fp))
@@ -294,11 +294,11 @@ class ReadFileTool(_FsTool):
             else:
                 # 没有可用状态，或者状态标记为不可 dedup，就走完整读取。
                 self._file_states.record_read(fp, offset=offset, limit=limit)
-                # Force full read by setting can_dedup to False for this read
+                # 通过把 can_dedup 设为 False，强制这一次走完整读取流程。
                 if entry:
                     entry.can_dedup = False
 
-            # Read the file content after dedup check
+            # 去重判断结束后，真正读取文件内容。
             raw = fp.read_bytes()
             try:
                 text_content = raw.decode("utf-8")
@@ -782,7 +782,12 @@ class EditFileTool(_FsTool):
 
     @staticmethod
     def _strip_trailing_ws(text: str) -> str:
-        """Strip trailing whitespace from each line."""
+        """去掉每一行行尾的空白字符。
+
+        这样做可以减少很多无意义差异，例如：
+        - 行尾多余空格
+        - 因模型输出格式造成的尾随空白
+        """
         return "\n".join(line.rstrip() for line in text.split("\n"))
 
     async def execute(

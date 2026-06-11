@@ -1,4 +1,16 @@
-"""WhatsApp channel implementation using Node.js bridge."""
+"""WhatsApp 渠道实现：通过 Node.js bridge 接入 WhatsApp Web。
+
+这个文件的定位是“平台适配器”：
+
+1. Python 主进程并不直接实现 WhatsApp Web 协议
+2. 复杂协议细节交给 Node.js bridge 处理
+3. 本文件只负责在 bridge 消息格式 与 nanobot 统一消息格式之间做转换
+
+对 Agent 初学者来说，这类文件很重要，因为它展示了：
+- 外部聊天平台如何接入消息总线
+- 多语言 bridge（Python + Node.js）如何协作
+- 渠道层如何把平台特定字段整理成统一的 ``InboundMessage`` / ``OutboundMessage``
+"""
 
 import asyncio
 import hashlib
@@ -23,7 +35,13 @@ from nanobot.config.schema import Base
 
 
 class WhatsAppConfig(Base):
-    """WhatsApp channel configuration."""
+    """WhatsApp 渠道配置模型。
+
+    这是“静态配置”而不是“运行时状态”：
+    - ``bridge_url``：Python 连接 bridge 的地址
+    - ``bridge_token``：Python 与 bridge 之间共享的鉴权密钥
+    - ``group_policy``：群聊里是全量响应，还是仅在被 @ 时响应
+    """
 
     enabled: bool = False
     bridge_url: str = "ws://localhost:3001"
@@ -33,13 +51,23 @@ class WhatsAppConfig(Base):
 
 
 def _bridge_token_path() -> Path:
+    """返回 bridge token 的本地保存路径。
+
+    当用户没有手工配置 ``bridge_token`` 时，nanobot 会在本地自动生成一个共享密钥，
+    Python 和 Node.js bridge 后续都使用它进行简单鉴权。
+    """
     from nanobot.config.paths import get_runtime_subdir
 
     return get_runtime_subdir("whatsapp-auth") / "bridge-token"
 
 
 def _load_or_create_bridge_token(path: Path) -> str:
-    """Load a persisted bridge token or create one on first use."""
+    """读取已保存的 bridge token；若不存在则首次创建。
+
+    这样可以保证：
+    - 首次运行时开箱即用
+    - 后续重启仍能复用同一个 bridge 身份
+    """
     if path.exists():
         token = path.read_text(encoding="utf-8").strip()
         if token:
@@ -54,11 +82,14 @@ def _load_or_create_bridge_token(path: Path) -> str:
 
 
 class WhatsAppChannel(BaseChannel):
-    """
-    WhatsApp channel that connects to a Node.js bridge.
+    """连接 Node.js bridge 的 WhatsApp 渠道适配器。
 
-    The bridge uses @whiskeysockets/baileys to handle the WhatsApp Web protocol.
-    Communication between Python and Node.js is via WebSocket.
+    bridge 侧使用 ``@whiskeysockets/baileys`` 处理 WhatsApp Web 协议，
+    本类负责：
+
+    - 建立和 bridge 的 WebSocket 连接
+    - 把 bridge 推来的事件翻译成统一消息
+    - 把 Agent 回复转成 bridge 可识别的发送命令
     """
 
     name = "whatsapp"
@@ -79,7 +110,13 @@ class WhatsAppChannel(BaseChannel):
         self._bridge_token: str | None = None
 
     def _effective_bridge_token(self) -> str:
-        """Resolve the bridge token, generating a local secret when needed."""
+        """得到当前应使用的 bridge token。
+
+        读取顺序是：
+        1. 进程内缓存
+        2. 配置文件里显式提供的 token
+        3. 本地自动生成并持久化的 token
+        """
         if self._bridge_token is not None:
             return self._bridge_token
         configured = self.config.bridge_token.strip()
@@ -90,12 +127,10 @@ class WhatsAppChannel(BaseChannel):
         return self._bridge_token
 
     async def login(self, force: bool = False) -> bool:
-        """
-        Set up and run the WhatsApp bridge for QR code login.
+        """启动 bridge，并进入二维码登录流程。
 
-        This spawns the Node.js bridge process which handles the WhatsApp
-        authentication flow. The process blocks until the user scans the QR code
-        or interrupts with Ctrl+C.
+        这里的“登录”不是 Python 直接请求 WhatsApp，而是拉起 Node.js bridge，
+        由 bridge 在终端中展示二维码并等待用户扫码。
         """
         try:
             bridge_dir = _ensure_bridge_setup()
@@ -118,7 +153,14 @@ class WhatsAppChannel(BaseChannel):
         return True
 
     async def start(self) -> None:
-        """Start the WhatsApp channel by connecting to the bridge."""
+        """启动渠道并持续连接 bridge。
+
+        这是运行期主循环：
+        - 建立 WebSocket 连接
+        - 先发送鉴权消息
+        - 持续监听 bridge 事件
+        - 出错后自动重连
+        """
         import websockets
 
         bridge_url = self.config.bridge_url
@@ -137,7 +179,7 @@ class WhatsAppChannel(BaseChannel):
                     self._connected = True
                     self.logger.info("Connected to WhatsApp bridge")
 
-                    # Listen for messages
+                    # 持续接收入站事件，bridge 会把 WhatsApp 平台消息编码成 JSON 推给我们。
                     async for message in ws:
                         try:
                             await self._handle_bridge_message(message)
@@ -156,7 +198,7 @@ class WhatsAppChannel(BaseChannel):
                     await asyncio.sleep(5)
 
     async def stop(self) -> None:
-        """Stop the WhatsApp channel."""
+        """停止渠道并关闭当前 WebSocket 连接。"""
         self._running = False
         self._connected = False
 
@@ -165,7 +207,7 @@ class WhatsAppChannel(BaseChannel):
             self._ws = None
 
     async def send(self, msg: OutboundMessage) -> None:
-        """Send a message through WhatsApp."""
+        """通过 bridge 向 WhatsApp 发送文本或媒体。"""
         if not self._ws or not self._connected:
             self.logger.warning("WhatsApp bridge not connected")
             return
@@ -196,7 +238,15 @@ class WhatsAppChannel(BaseChannel):
                 raise
 
     async def _handle_bridge_message(self, raw: str) -> None:
-        """Handle a message from the bridge."""
+        """处理 bridge 发来的一条原始 JSON 事件。
+
+        这是本文件最关键的入站转换函数。它会：
+        1. 解析 bridge payload
+        2. 区分消息/状态/二维码/错误事件
+        3. 从 WhatsApp 的多种身份字段中推导统一 ``sender_id``
+        4. 补充媒体标签与语音转写
+        5. 调用 ``_handle_message()`` 投递到消息总线
+        """
         try:
             data = json.loads(raw)
         except json.JSONDecodeError:
@@ -206,15 +256,15 @@ class WhatsAppChannel(BaseChannel):
         msg_type = data.get("type")
 
         if msg_type == "message":
-            # Incoming message from WhatsApp
-            # Deprecated by whatsapp: old phone number style typically: <phone>@s.whatspp.net
+            # 入站消息。
+            # pn 是较旧的手机号风格身份，典型形式：<phone>@s.whatsapp.net
             pn = data.get("pn", "")
-            # New LID sytle typically:
+            # sender 往往是较新的 LID 风格身份。
             sender = data.get("sender", "")
             content = data.get("content", "")
             message_id = data.get("id", "")
 
-            # Extract just the phone number or lid as chat_id
+            # 群聊是否需要仅在被 @ 时才响应，由配置控制。
             is_group = data.get("isGroup", False)
             was_mentioned = bool(data.get("wasMentioned", False) or data.get("isReplyToBot", False))
 
@@ -222,8 +272,8 @@ class WhatsAppChannel(BaseChannel):
                 if not was_mentioned:
                     return
 
-            # Classify by JID suffix: @s.whatsapp.net = phone, @lid.whatsapp.net = LID
-            # The bridge's pn/sender fields don't consistently map to phone/LID across versions.
+            # 通过 JID 后缀识别“手机号身份”和“LID 身份”。
+            # bridge 不同版本的字段映射不完全稳定，所以这里做兼容推断。
             raw_a = pn or ""
             participant = data.get("participant", "")
             raw_b = participant or sender or ""
@@ -238,7 +288,7 @@ class WhatsAppChannel(BaseChannel):
                 elif "@lid.whatsapp.net" in raw:
                     lid_id = extracted
                 elif extracted and not phone_id:
-                    phone_id = extracted  # best guess for bare values
+                    phone_id = extracted  # 对无后缀裸值做保守兜底
 
             sender_id = phone_id or self._lid_to_phone.get(lid_id, "") or lid_id or id_a or id_b
             if not self.is_allowed(sender_id):
@@ -247,19 +297,21 @@ class WhatsAppChannel(BaseChannel):
             if message_id:
                 if message_id in self._processed_message_ids:
                     return
+                # 用一个小型有序缓存做去重，避免 bridge 重发导致 Agent 重复执行。
                 self._processed_message_ids[message_id] = None
                 while len(self._processed_message_ids) > 1000:
                     self._processed_message_ids.popitem(last=False)
 
             if phone_id and lid_id:
+                # 记住 LID -> 手机号映射，后续只拿到 LID 时仍可做权限判断。
                 self._lid_to_phone[lid_id] = phone_id
 
             self.logger.info("Sender phone={} lid={} → sender_id={}", phone_id or "(empty)", lid_id or "(empty)", sender_id)
 
-            # Extract media paths (images/documents/videos downloaded by the bridge)
+            # bridge 侧已下载好的媒体路径会直接附在消息里。
             media_paths = data.get("media") or []
 
-            # Handle voice transcription if it's a voice message
+            # 尽量把语音消息统一转成文本，这样后续 Agent 不用区分文本输入与语音输入。
             if content == "[Voice Message]":
                 if media_paths:
                     self.logger.info("Transcribing voice message from {}...", sender_id)
@@ -273,7 +325,7 @@ class WhatsAppChannel(BaseChannel):
                 else:
                     content = "[Voice Message: Audio not available]"
 
-            # Build content tags matching Telegram's pattern: [image: /path] or [file: /path]
+            # 把媒体附加成统一标签，保持和其他渠道相似的上下文格式。
             if media_paths:
                 for p in media_paths:
                     mime, _ = mimetypes.guess_type(p)
@@ -283,7 +335,7 @@ class WhatsAppChannel(BaseChannel):
 
             await self._handle_message(
                 sender_id=sender_id,
-                chat_id=sender,  # Use full LID for replies
+                chat_id=sender,  # 回复时尽量沿用平台原生会话标识，避免只用手机号导致定位不准
                 content=content,
                 media=media_paths,
                 metadata={
@@ -296,7 +348,7 @@ class WhatsAppChannel(BaseChannel):
             )
 
         elif msg_type == "status":
-            # Connection status update
+            # bridge 连接状态变化事件。
             status = data.get("status")
             self.logger.info("Status: {}", status)
 
@@ -306,7 +358,7 @@ class WhatsAppChannel(BaseChannel):
                 self._connected = False
 
         elif msg_type == "qr":
-            # QR code for authentication
+            # 二维码本身通常在 bridge 终端里显示，这里只提示用户去扫码。
             self.logger.info("Scan QR code in the bridge terminal to connect WhatsApp")
 
         elif msg_type == "error":
@@ -314,18 +366,20 @@ class WhatsAppChannel(BaseChannel):
 
 
 def _ensure_bridge_setup() -> Path:
-    """
-    Ensure the WhatsApp bridge is set up and built.
+    """确保 WhatsApp bridge 已复制、安装依赖并构建完成。
 
-    Returns the bridge directory. Raises RuntimeError if npm is not found
-    or bridge cannot be built.
+    这一步处理的是“bridge 运行环境准备”，不是“连接 WhatsApp”本身。
+    它会：
+    1. 定位 bridge 源码目录
+    2. 计算源码哈希，判断本地缓存是否过期
+    3. 需要时重新复制 bridge、执行 ``npm install`` 和 ``npm run build``
     """
     from nanobot.config.paths import get_bridge_install_dir
 
     user_bridge = get_bridge_install_dir()
     stamp_file = user_bridge / ".nanobot-bridge-source-hash"
 
-    # Find source bridge
+    # 优先使用打包进安装产物里的 bridge；若不存在，则回退到源码仓库目录。
     current_file = Path(__file__)
     pkg_bridge = current_file.parent.parent / "bridge"
     src_bridge = current_file.parent.parent.parent / "bridge"
@@ -343,6 +397,7 @@ def _ensure_bridge_setup() -> Path:
         )
 
     def source_hash(root: Path) -> str:
+        """计算 bridge 源目录内容哈希，用于判断是否需要重建。"""
         digest = hashlib.sha256()
         for path in sorted(root.rglob("*")):
             if not path.is_file():
@@ -359,6 +414,7 @@ def _ensure_bridge_setup() -> Path:
     expected_hash = source_hash(source)
     current_hash = stamp_file.read_text().strip() if stamp_file.exists() else None
 
+    # dist 存在且源码哈希一致，说明 bridge 已是最新构建结果，可直接复用。
     if (user_bridge / "dist" / "index.js").exists() and current_hash == expected_hash:
         return user_bridge
 

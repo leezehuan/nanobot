@@ -654,11 +654,10 @@ class AgentRunner:
         else:
             # for...else 进入这里，说明循环次数用尽仍未自然结束。
             stop_reason = "max_iterations"
-            # Drain any remaining injections so they are appended to the
-            # conversation history instead of being re-published as
-            # independent inbound messages by _dispatch's finally block.
-            # We include them before the no-tools finalization pass so the
-            # final response can account for every known follow-up.
+            # 把剩余待注入消息一并“排空”出来，直接接到当前对话历史后面，
+            # 而不是让 _dispatch 的 finally 分支把它们重新发布成独立的入站消息。
+            # 这样做的目的，是让“达到最大迭代次数时的最后一次收尾回答”
+            # 也能看到这些后续补充内容，避免用户消息被遗漏到下一轮。
             drained_after_max_iterations, injection_cycles = await self._try_drain_injections(
                 spec, messages, None, injection_cycles,
                 phase="after max_iterations",
@@ -829,10 +828,11 @@ class AgentRunner:
         else:
             coro = self.provider.chat_with_retry(**kwargs)
 
-        # Streaming requests already have provider-level idle timeouts
-        # (NANOBOT_STREAM_IDLE_TIMEOUT_S). Do not also apply the outer wall-clock
-        # LLM timeout here, or healthy long reasoning streams can be killed just
-        # because total elapsed time exceeded NANOBOT_LLM_TIMEOUT_S.
+        # 流式请求已经有 provider 级“空闲超时”保护
+        # （``NANOBOT_STREAM_IDLE_TIMEOUT_S``）。
+        # 因此这里不要再额外套一层“总耗时墙钟超时”，否则一个持续稳定产出、
+        # 只是总时长较长的健康流式推理，也可能仅因为超过
+        # ``NANOBOT_LLM_TIMEOUT_S`` 而被误杀。
         outer_timeout_s = None if (wants_streaming or wants_progress_streaming) else timeout_s
         try:
             response = (
@@ -1154,7 +1154,7 @@ class AgentRunner:
             payload = f"Error: {type(exc).__name__}: {exc}"
             handled = self._classify_violation(
                 raw_text=str(exc),
-                # Preserve legacy exception payloads without the retry hint.
+                # 为了兼容旧行为，这里保留原始异常文本格式，不额外附加“可否重试”的提示。
                 soft_payload=payload,
                 event=event,
                 tool_call=tool_call,
@@ -1210,8 +1210,9 @@ class AgentRunner:
             detail = detail[:120] + "..."
         return result, {"name": tool_call.name, "status": "ok", "detail": detail}, None
 
-    # SSRF is a hard security block at the tool boundary, but the agent turn
-    # should recover conversationally instead of aborting the runtime.
+    # SSRF 是工具边界上的“硬安全拦截”：
+    # 工具调用必须被立刻挡住，但整个 Agent 回合不应该因此直接崩掉，
+    # 而是应当把它转成一条可对话恢复的工具错误，让模型改用安全方案继续。
     _SSRF_MARKERS: tuple[str, ...] = (
         "internal/private url detected",
         "private/internal address",
@@ -1226,7 +1227,9 @@ class AgentRunner:
         "the exact IP/CIDR via tools.ssrfWhitelist."
     )
 
-    # Non-SSRF boundary markers returned to the LLM as recoverable tool errors.
+    # 非 SSRF 的边界违规标记：
+    # 例如越过 workspace 边界。这类错误同样返回给 LLM，但属于“可恢复工具错误”，
+    # 目标是引导模型换一个安全路径、参数或文件继续尝试。
     _WORKSPACE_VIOLATION_MARKERS: tuple[str, ...] = (
         "outside the configured workspace",
         "outside allowed directory",
@@ -1245,7 +1248,7 @@ class AgentRunner:
 
     @classmethod
     def _is_workspace_violation(cls, text: str) -> bool:
-        """True when *text* looks like any policy boundary rejection."""
+        """判断一段文本是否看起来像“命中了安全/策略边界”的拒绝信息。"""
         if not text:
             return False
         lowered = text.lower()
@@ -1343,7 +1346,8 @@ class AgentRunner:
         """规范化工具结果，并在必要时把超大结果落盘后回填引用。"""
         result = ensure_nonempty_tool_result(tool_name, result)
         if tool_name in _TOOL_RESULT_OFFLOAD_EXEMPT_TOOLS:
-            # Exempt tools bound their own output; skip generic offload and truncation.
+            # 这些豁免工具会自己控制输出体积与格式，
+            # 因此跳过通用的“结果落盘 + 截断”处理。
             return result
         try:
             content = maybe_persist_tool_result(
@@ -1542,8 +1546,9 @@ class AgentRunner:
                     if non_system[idx].get("role") == "user":
                         kept = non_system[idx:]
                         break
-                # If no user exists at all, _enforce_role_alternation
-                # will insert a synthetic one as a safety net.
+                # 如果历史里一个 user 都找不回来，
+                # ``_enforce_role_alternation`` 会再补一个合成 user 作为兜底，
+                # 以满足某些 Provider 对角色顺序的严格要求。
             start = find_legal_message_start(kept)
             if start:
                 kept = kept[start:]

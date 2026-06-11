@@ -1,4 +1,4 @@
-"""Helpers for WebUI image-generation intent metadata."""
+"""WebUI 图片生成意图辅助工具。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,10 @@ IMAGE_GENERATION_METADATA_KEY = "image_generation"
 
 
 def image_generation_prompt(content: str, metadata: dict[str, Any] | None) -> str:
-    """Decorate a user prompt when WebUI image mode is enabled."""
+    """当 WebUI 开启图片生成模式时，为用户提示词追加工具使用指令。
+
+    它不会覆盖原始用户输入，只是在末尾补一段“请优先调用 generate_image”的说明。
+    """
     raw = (metadata or {}).get(IMAGE_GENERATION_METADATA_KEY)
     if not isinstance(raw, dict) or raw.get("enabled") is not True:
         return content

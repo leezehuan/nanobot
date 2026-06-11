@@ -1,4 +1,8 @@
-"""Artifact persistence helpers for generated media."""
+"""生成媒体工件（artifact）的持久化辅助函数。
+
+这里主要负责把图片生成工具产出的 data URL 真正落成磁盘文件，
+并配套写一份元数据 sidecar，方便后续继续编辑、展示或回传给用户。
+"""
 
 from __future__ import annotations
 
@@ -23,11 +27,11 @@ _MIME_EXTENSIONS = {
 }
 
 class ArtifactError(ValueError):
-    """Raised when an artifact cannot be safely decoded or stored."""
+    """当 artifact 不能被安全解码或保存时抛出的异常。"""
 
 
 def decode_image_data_url(data_url: str) -> tuple[bytes, str]:
-    """Decode a base64 image data URL and return ``(bytes, mime)``."""
+    """解码 base64 图片 data URL，返回 ``(bytes, mime)``。"""
     match = _DATA_IMAGE_RE.match(data_url.strip())
     if match is None:
         raise ArtifactError("expected a base64 image data URL")
@@ -47,6 +51,7 @@ def decode_image_data_url(data_url: str) -> tuple[bytes, str]:
 
 
 def _safe_relative_dir(save_dir: str) -> Path:
+    """校验 ``save_dir`` 必须是安全的相对目录。"""
     normalized = save_dir.replace("\\", "/").strip("/")
     if not normalized:
         raise ArtifactError("save_dir must not be empty")
@@ -57,6 +62,7 @@ def _safe_relative_dir(save_dir: str) -> Path:
 
 
 def _artifact_root(save_dir: str) -> Path:
+    """解析 artifact 根目录，并保证它不会逃出 media 根目录。"""
     media_root = get_media_dir().resolve()
     root = (media_root / _safe_relative_dir(save_dir)).resolve()
     try:
@@ -76,7 +82,7 @@ def store_generated_image_artifact(
     provider: str = "openrouter",
     created_at: datetime | None = None,
 ) -> dict[str, Any]:
-    """Persist a generated image and sidecar metadata under the media root."""
+    """把生成图片及其 sidecar 元数据持久化到 media 目录下。"""
     raw, mime = decode_image_data_url(data_url)
     ext = _MIME_EXTENSIONS.get(mime)
     if ext is None:
@@ -107,7 +113,7 @@ def store_generated_image_artifact(
 
 
 def generated_image_tool_result(artifacts: list[dict[str, Any]]) -> str:
-    """Return the compact structured result exposed to the LLM."""
+    """返回暴露给 LLM 的紧凑结构化结果。"""
     return json.dumps(
         {
             "artifacts": artifacts,

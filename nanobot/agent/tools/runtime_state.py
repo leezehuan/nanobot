@@ -1,15 +1,24 @@
-"""RuntimeState protocol: agent loop state exposed to MyTool."""
+"""RuntimeState 协议：定义 MyTool 可读取/修改的运行时状态接口。
+
+这里不是一个真正的实现类，而是一个“最小契约”：
+
+- MyTool 至少要求运行时对象提供哪些属性
+- 这些属性大概代表什么运行时状态
+
+在实际运行中，这个协议通常由 ``AgentLoop`` 满足。
+"""
 
 from typing import Any, Protocol
 
 
 class RuntimeState(Protocol):
-    """Minimum contract that MyTool requires from its runtime state provider.
+    """MyTool 对运行时状态提供者要求的最小契约。
 
-    In practice, this is always satisfied by ``AgentLoop``.  MyTool also
-    accesses arbitrary attributes dynamically (via ``getattr`` / ``setattr``)
-    for dot-path inspection and modification; those paths are validated at
-    runtime rather than by this protocol.
+    注意：
+
+    - 这只是“最低必需字段”列表
+    - MyTool 还会通过 ``getattr`` / ``setattr`` 动态访问更多属性
+    - 那些点路径访问是否合法，不靠这个协议静态保证，而是在运行时校验
     """
 
     @property

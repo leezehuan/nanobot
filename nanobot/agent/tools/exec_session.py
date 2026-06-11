@@ -1,4 +1,19 @@
-"""Session support for long-running exec workflows."""
+"""长生命周期 exec 工作流的会话支持。
+
+这里解决的是一个很实际的问题：
+普通 ``exec`` 工具通常是“一次启动命令，一次拿回结果”，
+但有些命令会持续运行很久，例如：
+- 开发服务器
+- 交互式 REPL
+- watch 模式测试
+- 需要多次向 stdin 写入内容的程序
+
+因此，这个模块额外维护一层“运行中进程会话”，让 Agent 可以：
+1. 先启动一个命令并拿到 ``session_id``
+2. 后续继续轮询输出
+3. 往 stdin 写入内容
+4. 在需要时关闭 stdin 或终止进程
+"""
 
 from __future__ import annotations
 
@@ -68,7 +83,7 @@ class _ExecSession:
         self.cwd = cwd
         self.owner_session_key = owner_session_key
         self.started_at = time.monotonic()
-        # timeout None/0 means no limit; an infinite deadline is never reached.
+        # timeout 为 None/0 表示不设超时；这里用无穷大 deadline 表示“永不到期”。
         self.deadline = time.monotonic() + timeout if timeout else float("inf")
         self.last_access = time.monotonic()
         self._chunks: list[str] = []
@@ -401,7 +416,12 @@ def format_session_poll(session_id: str, poll: _SessionPoll) -> str:
     )
 )
 class WriteStdinTool(Tool):
-    """Write to or poll a running exec session."""
+    """向运行中的 exec 会话写入 stdin，或轮询其最新输出。
+
+    这个工具本质上是 ``exec`` 的“续集工具”：
+    - ``exec`` 负责启动长任务
+    - ``write_stdin`` 负责继续与这个任务交互
+    """
 
     _scopes = {"core", "subagent"}
     config_key = "exec"
@@ -543,7 +563,11 @@ class WriteStdinTool(Tool):
 
 @tool_parameters(tool_parameters_schema())
 class ListExecSessionsTool(Tool):
-    """List active exec sessions."""
+    """列出当前仍然活跃的 exec 会话。
+
+    当模型上下文发生切换、忘记 ``session_id``，或者需要排查“后台到底还跑着什么”
+    时，这个工具就很有用。
+    """
 
     _scopes = {"core", "subagent"}
     config_key = "exec"

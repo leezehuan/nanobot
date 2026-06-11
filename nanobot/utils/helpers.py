@@ -1,4 +1,15 @@
-"""Utility functions for nanobot."""
+"""nanobot 通用工具函数集合。
+
+这个文件里放的是很多模块都会复用的“小而关键”的底层函数，例如：
+
+- 清理模型泄漏的 think 标签
+- 提取 reasoning
+- 估算 token
+- 持久化超长工具输出
+- 生成状态文本
+
+初学者读这个文件时，可以把它当成“项目级杂项基础设施库”。
+"""
 
 import base64
 import json
@@ -40,28 +51,24 @@ def strip_think(text: str) -> str:
     tokens mid-text would silently rewrite any message where a user or the
     assistant discusses the tokens themselves.
     """
-    # Well-formed blocks first.
+    # 先处理结构完整的 think/thought 块。
     text = re.sub(r"<think>[\s\S]*?</think>", "", text)
     text = re.sub(r"^\s*<think>[\s\S]*$", "", text)
     text = re.sub(r"<thought>[\s\S]*?</thought>", "", text)
     text = re.sub(r"^\s*<thought>[\s\S]*$", "", text)
-    # Malformed opening tags: `<think` / `<thought` where the next char is
-    # NOT one that could continue a valid tag / identifier name. Explicitly
-    # listing ASCII tag-name chars (letters, digits, `_`, `-`, `:`) plus
-    # `>` / `/` — we can't use `\w` here because in Python's default
-    # Unicode regex mode it matches CJK characters too, which would defeat
-    # the primary fix for `<think广场…` leaks.
+    # 再处理“坏掉的 opening tag”，比如 `<think广场...` 这种模型泄漏。
+    # 这里不能直接用 `\w`，因为 Python 默认 Unicode 模式下，
+    # 中文也会被当成单词字符，反而会放过这类泄漏。
     text = re.sub(r"<think(?![A-Za-z0-9_\-:>/])", "", text)
     text = re.sub(r"<thought(?![A-Za-z0-9_\-:>/])", "", text)
-    # Edge-only orphan closing tags (start or end of text).
+    # 只清理文本边缘上的孤儿 closing tag，避免误改正文讨论内容。
     text = re.sub(r"^\s*</think>\s*", "", text)
     text = re.sub(r"\s*</think>\s*$", "", text)
     text = re.sub(r"^\s*</thought>\s*", "", text)
     text = re.sub(r"\s*</thought>\s*$", "", text)
-    # Edge-only channel markers (harmony / Gemma 4 variant leaks).
+    # 只清理文本开头处的 channel marker 泄漏。
     text = re.sub(r"^\s*<\|?channel\|?>\s*", "", text)
-    # Stream chunks may end in the middle of a control tag. Strip only known
-    # control-token prefixes at the very end.
+    # 流式分片可能刚好切在控制标签中间，所以这里只清理已知的“尾部残片”。
     partial_control_tag = (
         r"</?(?:t|th|thi|thin|think|tho|thou|thoug|though|thought)>?"
         r"|<\|?(?:c|ch|cha|chan|chann|channe|channel)(?:\|?>?)?"
@@ -88,13 +95,10 @@ def extract_think(text: str) -> tuple[str | None, str]:
 
 
 class IncrementalThinkExtractor:
-    """Stateful inline ``<think>`` extractor for streaming buffers.
+    """面向流式输出的增量 think 提取器。
 
-    Streaming providers expose only a single content delta channel. When a
-    model embeds reasoning in ``<think>...</think>`` blocks inside that
-    channel, callers need to surface the reasoning incrementally as it
-    arrives without re-emitting earlier text. This holds the "already
-    emitted" cursor so the runner and the loop hook share one shape.
+    某些 provider 不会单独给 reasoning 通道，而是把它混在内容流里。
+    这个类负责在流式过程中“只增量吐出新的 thinking 文本”，避免重复发旧内容。
     """
 
     __slots__ = ("_emitted",)
@@ -106,12 +110,7 @@ class IncrementalThinkExtractor:
         self._emitted = ""
 
     async def feed(self, buf: str, emit: Any) -> bool:
-        """Emit any new thinking text found in ``buf``.
-
-        Returns True if anything was emitted this call. ``emit`` is an
-        async callable taking a single string (typically
-        ``hook.emit_reasoning``).
-        """
+        """从当前缓冲区里提取新出现的 thinking 文本并发射出去。"""
         thinking, _ = extract_think(buf)
         if not thinking or thinking == self._emitted:
             return False
@@ -128,21 +127,7 @@ def extract_reasoning(
     thinking_blocks: list[dict[str, Any]] | None,
     content: str | None,
 ) -> tuple[str | None, str | None]:
-    """Return ``(reasoning_text, cleaned_content)`` from one model response.
-
-    Single source of truth for "what reasoning did this response carry, and
-    what answer text remains after we peel it out". Fallback order:
-
-    1. Dedicated ``reasoning_content`` (DeepSeek-R1, Kimi, MiMo, OpenAI
-       reasoning models, Bedrock).
-    2. Anthropic ``thinking_blocks``.
-    3. Inline ``<think>`` / ``<thought>`` blocks in ``content``.
-
-    Only one source contributes per response; lower-priority sources are
-    ignored if a higher-priority one is present, but inline ``<think>``
-    tags are still stripped from ``content`` so they never leak into the
-    final answer.
-    """
+    """统一提取一次模型响应里的 reasoning 与清洗后的正文。"""
     if reasoning_content:
         return reasoning_content, strip_think(content) if content else content
     if thinking_blocks:
@@ -159,7 +144,7 @@ def extract_reasoning(
 
 
 def detect_image_mime(data: bytes) -> str | None:
-    """Detect image MIME type from magic bytes, ignoring file extension."""
+    """仅根据魔数识别图片 MIME 类型，不依赖文件扩展名。"""
     if data[:8] == b"\x89PNG\r\n\x1a\n":
         return "image/png"
     if data[:3] == b"\xff\xd8\xff":
@@ -174,7 +159,7 @@ def detect_image_mime(data: bytes) -> str | None:
 def build_image_content_blocks(
     raw: bytes, mime: str, path: str, label: str
 ) -> list[dict[str, Any]]:
-    """Build native image blocks plus a short text label."""
+    """构造图片内容块，并附上一小段文本标签。"""
     b64 = base64.b64encode(raw).decode()
     return [
         {
@@ -187,18 +172,18 @@ def build_image_content_blocks(
 
 
 def ensure_dir(path: Path) -> Path:
-    """Ensure directory exists, return it."""
+    """确保目录存在，并返回该路径。"""
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
 def timestamp() -> str:
-    """Current ISO timestamp."""
+    """返回当前 ISO 时间戳字符串。"""
     return datetime.now().isoformat()
 
 
 def current_time_str(timezone: str | None = None) -> str:
-    """Return the current time string."""
+    """返回适合显示给用户/模型看的当前时间字符串。"""
     from zoneinfo import ZoneInfo
 
     try:
@@ -221,24 +206,24 @@ _TOOL_RESULT_MAX_BUCKETS = 32
 
 
 def safe_filename(name: str) -> str:
-    """Replace unsafe path characters with underscores."""
+    """把不安全文件名字符替换成下划线。"""
     return _UNSAFE_CHARS.sub("_", name).strip()
 
 
 def image_placeholder_text(path: str | None, *, empty: str = "[image]") -> str:
-    """Build an image placeholder string."""
+    """构造图片占位文本。"""
     return f"[image: {path}]" if path else empty
 
 
 def truncate_text(text: str, max_chars: int) -> str:
-    """Truncate text with a stable suffix."""
+    """截断文本，并附加稳定的截断后缀。"""
     if max_chars <= 0 or len(text) <= max_chars:
         return text
     return text[:max_chars] + "\n... (truncated)"
 
 
 def find_legal_message_start(messages: list[dict[str, Any]]) -> int:
-    """Find the first index whose tool results have matching assistant calls."""
+    """找到一个“工具调用语义合法”的消息起点。"""
     declared: set[str] = set()
     start = 0
     for i, msg in enumerate(messages):
@@ -327,7 +312,7 @@ def maybe_persist_tool_result(
     *,
     max_chars: int,
 ) -> Any:
-    """Persist oversized tool output and replace it with a stable reference string."""
+    """把超长工具输出落盘，并用稳定引用文本替换原始内容。"""
     if workspace is None or max_chars <= 0:
         return content
 
@@ -406,7 +391,7 @@ def build_assistant_message(
     reasoning_content: str | None = None,
     thinking_blocks: list[dict] | None = None,
 ) -> dict[str, Any]:
-    """Build a provider-safe assistant message with optional reasoning fields."""
+    """构造一条对各类 Provider 更安全的 assistant 消息。"""
     msg: dict[str, Any] = {"role": "assistant", "content": content or ""}
     if tool_calls:
         msg["tool_calls"] = tool_calls
@@ -421,11 +406,7 @@ def estimate_prompt_tokens(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None = None,
 ) -> int:
-    """Estimate prompt tokens with tiktoken.
-
-    Counts all fields that providers send to the LLM: content, tool_calls,
-    reasoning_content, tool_call_id, name, plus per-message framing overhead.
-    """
+    """使用 tiktoken 粗略估算一组消息会占多少 prompt token。"""
     try:
         enc = tiktoken.get_encoding("cl100k_base")
         parts: list[str] = []
@@ -463,7 +444,7 @@ def estimate_prompt_tokens(
 
 
 def estimate_message_tokens(message: dict[str, Any]) -> int:
-    """Estimate prompt tokens contributed by one persisted message."""
+    """估算单条持久化消息大约会贡献多少 prompt token。"""
     content = message.get("content")
     parts: list[str] = []
     if isinstance(content, str):
@@ -506,7 +487,7 @@ def estimate_prompt_tokens_chain(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None = None,
 ) -> tuple[int, str]:
-    """Estimate prompt tokens via provider counter first, then tiktoken fallback."""
+    """优先走 Provider 自带计数器，否则回退到 tiktoken 估算。"""
     provider_counter = getattr(provider, "estimate_prompt_tokens", None)
     if callable(provider_counter):
         with suppress(Exception):
@@ -532,13 +513,7 @@ def build_status_content(
     active_task_count: int = 0,
     max_completion_tokens: int = 8192,
 ) -> str:
-    """Build a human-readable runtime status snapshot.
-
-    Args:
-        search_usage_text: Optional pre-formatted web search usage string
-                           (produced by SearchUsageInfo.format()). When provided
-                           it is appended as an extra section.
-    """
+    """构造一份适合展示给用户的运行时状态快照。"""
     uptime_s = int(time.time() - start_time)
     uptime = (
         f"{uptime_s // 3600}h {(uptime_s % 3600) // 60}m"
@@ -549,7 +524,7 @@ def build_status_content(
     last_out = last_usage.get("completion_tokens", 0)
     cached = last_usage.get("cached_tokens", 0)
     ctx_total = max(context_window_tokens, 0)
-    # Budget mirrors Consolidator formula: ctx_window - max_completion - _SAFETY_BUFFER
+    # 这里的预算公式与 Consolidator 保持一致。
     ctx_budget = max(ctx_total - int(max_completion_tokens) - 1024, 1)
     ctx_pct = min(int((context_tokens_estimate / ctx_budget) * 100), 999) if ctx_budget > 0 else 0
     ctx_used_str = (
@@ -576,7 +551,7 @@ def build_status_content(
 
 
 def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]:
-    """Sync bundled templates to workspace. Creates missing files without overwriting user files."""
+    """把内置模板同步到 workspace，只补缺失文件，不覆盖用户已有文件。"""
     from importlib.resources import files as pkg_files
 
     try:
@@ -609,7 +584,7 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
         for name in added:
             Console().print(f"  [dim]Created {name}[/dim]")
 
-    # Initialize git for memory version control
+    # 顺手初始化 memory 相关文件的 git 版本跟踪。
     try:
         from nanobot.utils.gitstore import GitStore
 
@@ -629,7 +604,7 @@ def sync_workspace_templates(workspace: Path, silent: bool = False) -> list[str]
 
 
 def load_bundled_template(template_name: str) -> str | None:
-    """Read a bundled template file from the nanobot package."""
+    """从 nanobot 包内读取一个内置模板文件。"""
     from importlib.resources import files as pkg_files
 
     with suppress(Exception):

@@ -130,14 +130,14 @@ class LLMResponse:
     tool_calls: list[ToolCallRequest] = field(default_factory=list)
     finish_reason: str = "stop"
     usage: dict[str, int] = field(default_factory=dict)
-    retry_after: float | None = None  # Provider supplied retry wait in seconds.
-    reasoning_content: str | None = None  # Kimi, DeepSeek-R1, MiMo etc.
-    thinking_blocks: list[dict] | None = None  # Anthropic extended thinking
-    # Structured error metadata used by retry policy when finish_reason == "error".
+    retry_after: float | None = None  # Provider 给出的重试等待秒数。
+    reasoning_content: str | None = None  # Kimi、DeepSeek-R1、MiMo 等模型的 reasoning 文本。
+    thinking_blocks: list[dict] | None = None  # Anthropic 风格的扩展 thinking 块。
+    # 当 finish_reason == "error" 时，重试策略会参考下面这些结构化错误元数据。
     error_status_code: int | None = None
-    error_kind: str | None = None  # e.g. "timeout", "connection"
-    error_type: str | None = None  # Provider/type semantic, e.g. insufficient_quota.
-    error_code: str | None = None  # Provider/code semantic, e.g. rate_limit_exceeded.
+    error_kind: str | None = None  # 例如 "timeout"、"connection"。
+    error_type: str | None = None  # Provider 语义类型，例如 insufficient_quota。
+    error_code: str | None = None  # Provider 语义错误码，例如 rate_limit_exceeded。
     error_retry_after_s: float | None = None
     error_should_retry: bool | None = None
 
@@ -471,7 +471,7 @@ class LLMProvider(ABC):
             return True
         if any(marker in content for marker in cls._RETRYABLE_429_TEXT_MARKERS):
             return True
-        # Unknown 429 defaults to WAIT+retry.
+        # 即使 429 的细分原因未知，也默认按“等待后重试”处理。
         return True
 
     @staticmethod
@@ -891,8 +891,8 @@ class LLMProvider(ABC):
                     retry_kw = dict(kw)
                     retry_kw["messages"] = stripped
                     result = await call(**retry_kw)
-                    # Permanently strip images from the original messages so
-                    # subsequent iterations do not repeat the error-retry cycle.
+                    # 如果去图后恢复成功，就永久移除原消息里的图片，
+                    # 避免后续迭代反复触发同样的“失败 -> 去图重试”循环。
                     if result.finish_reason != "error":
                         self._strip_image_content_inplace(original_messages)
                     return result

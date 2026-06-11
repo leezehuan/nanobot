@@ -1,4 +1,19 @@
-"""Slack channel implementation using Socket Mode."""
+"""Slack 渠道实现：通过 Socket Mode 接收事件并发送回复。
+
+Slack 有 webhook、Events API、Socket Mode 等多种接入方式，这个文件选择的是
+Socket Mode。也就是说：
+
+- nanobot 主动连到 Slack 的 WebSocket
+- Slack 把消息事件主动推给我们
+- 我们不需要自己暴露公网 webhook
+
+这个适配器的核心职责是：
+1. 维护 Slack 连接
+2. 解析普通消息、@ 机器人、按钮点击等事件
+3. 下载 Slack 私有附件
+4. 在需要时补充 thread 上下文
+5. 把 Agent 回复转换成 Slack 可显示的 mrkdwn / Block Kit
+"""
 
 import asyncio
 import re
@@ -23,7 +38,10 @@ from nanobot.utils.helpers import safe_filename, split_message
 
 
 class SlackDMConfig(Base):
-    """Slack DM policy configuration."""
+    """Slack 私聊策略配置。
+
+    Slack 的私聊和群聊/频道权限通常不同，所以这里单独拆出一个子配置模型。
+    """
 
     enabled: bool = True
     policy: str = "open"
@@ -31,7 +49,7 @@ class SlackDMConfig(Base):
 
 
 class SlackConfig(Base):
-    """Slack channel configuration."""
+    """Slack 渠道配置模型。"""
 
     enabled: bool = False
     mode: str = "socket"
@@ -52,15 +70,21 @@ class SlackConfig(Base):
 
 SLACK_MAX_MESSAGE_LEN = 39_000  # Slack API allows ~40k; leave margin
 SLACK_DOWNLOAD_TIMEOUT = 30.0
-# Abort Socket Mode WSS handshake after this many seconds. REST auth_test can still
-# succeed while WSS blocks (firewall / region). slack-sdk does not apply HTTP(S)_PROXY
-# to websockets.connect — see slack_sdk.socket_mode.websockets.SocketModeClient.connect.
+# Socket Mode 的 WSS 握手超时时间。
+# 注意：REST 的 auth_test 成功，并不代表 WebSocket 一定能连通。
+# 某些网络环境下 HTTPS 通、WSS 被防火墙拦住是可能发生的。
 SLACK_SOCKET_CONNECT_TIMEOUT_S = 45.0
 _HTML_DOWNLOAD_PREFIXES = (b"<!doctype html", b"<html")
 
 
 class SlackChannel(BaseChannel):
-    """Slack channel using Socket Mode."""
+    """基于 Socket Mode 的 Slack 渠道适配器。
+
+    如果你是初学者，建议重点看这三个入口：
+    - ``start()``：建立连接
+    - ``_on_socket_request()``：处理 Slack 推来的事件
+    - ``send()``：把 Agent 输出发回 Slack
+    """
 
     name = "slack"
     display_name = "Slack"
@@ -86,7 +110,7 @@ class SlackChannel(BaseChannel):
         self._thread_context_attempted: set[str] = set()
 
     async def start(self) -> None:
-        """Start the Slack Socket Mode client."""
+        """启动 Slack Socket Mode 客户端。"""
         if not self.config.bot_token or not self.config.app_token:
             self.logger.error("bot/app token not configured")
             return
@@ -104,7 +128,7 @@ class SlackChannel(BaseChannel):
 
         self._socket_client.socket_mode_request_listeners.append(self._on_socket_request)
 
-        # Resolve bot user ID for mention handling
+        # 先拿到机器人自己的 user_id，后面判断“是否被 @”和“是否是自己发的消息”都要用。
         try:
             auth = await self._web_client.auth_test()
             self._bot_user_id = auth.get("user_id")
@@ -135,7 +159,7 @@ class SlackChannel(BaseChannel):
             await asyncio.sleep(1)
 
     async def stop(self) -> None:
-        """Stop the Slack client."""
+        """停止 Slack 客户端并关闭 Socket Mode 连接。"""
         self._running = False
         if self._socket_client:
             try:
@@ -145,7 +169,13 @@ class SlackChannel(BaseChannel):
             self._socket_client = None
 
     async def send(self, msg: OutboundMessage) -> None:
-        """Send a message through Slack."""
+        """向 Slack 发送文本、按钮和附件。
+
+        这个方法会自动处理：
+        - 人类可读目标（例如 ``#general`` / ``@alice``）到真实 chat_id 的解析
+        - 是否应该继续回复到原线程
+        - 进度消息与最终消息的表情状态切换
+        """
         if not self._web_client:
             self.logger.warning("client not running")
             return
@@ -154,15 +184,13 @@ class SlackChannel(BaseChannel):
             slack_meta = msg.metadata.get("slack", {}) if msg.metadata else {}
             thread_ts = slack_meta.get("thread_ts")
             origin_chat_id = str((slack_meta.get("event", {}) or {}).get("channel") or msg.chat_id)
-            # Reply in the same thread the inbound message belongs to (works
-            # for both real channel threads and DM threads). When the agent
-            # is forwarding to a different channel, drop thread_ts because it
-            # only makes sense within the originating conversation.
+            # 尽量回到原消息所在的 thread；但如果消息被转发到别的频道，
+            # 旧的 thread_ts 已经失去意义，就不能继续沿用。
             thread_ts_param = thread_ts if thread_ts and target_chat_id == origin_chat_id else None
 
             is_progress = (msg.metadata or {}).get("_progress", False)
             if is_progress and not msg.content:
-                pass  # skip empty progress messages (e.g. tool-event-only updates)
+                pass  # 纯事件型进度更新没有正文时，跳过发送空消息
             elif msg.content or not (msg.media or []):
                 mrkdwn = self._to_mrkdwn(msg.content) if msg.content else " "
                 buttons = getattr(msg, "buttons", None) or []
@@ -185,7 +213,7 @@ class SlackChannel(BaseChannel):
                 except Exception:
                     self.logger.exception("Failed to upload file {}", media_path)
 
-            # Update reaction emoji when the final (non-progress) response is sent
+            # 非进度消息发出后，把“处理中”表情切换成“完成”表情。
             if not (msg.metadata or {}).get("_progress"):
                 event = slack_meta.get("event", {})
                 await self._update_react_emoji(origin_chat_id, event.get("ts"))
@@ -195,7 +223,14 @@ class SlackChannel(BaseChannel):
             raise
 
     async def _resolve_target_chat_id(self, target: str) -> str:
-        """Resolve human-friendly Slack targets to concrete IDs when needed."""
+        """把用户友好的 Slack 目标写法解析成真实 chat_id。
+
+        支持：
+        - 原生 ID：``C123...`` / ``D123...`` / ``U123...``
+        - 频道名：``#general``
+        - 用户名：``@alice``
+        - Slack 富文本引用：``<#C123|general>``、``<@U123>``
+        """
         if not self._web_client:
             return target
 
@@ -310,14 +345,22 @@ class SlackChannel(BaseChannel):
         client: SocketModeClient,
         req: SocketModeRequest,
     ) -> None:
-        """Handle incoming Socket Mode requests."""
+        """处理 Slack 通过 Socket Mode 推来的请求。
+
+        这是 Slack 入站消息的总入口：
+        1. 先 ACK，防止 Slack 认为超时并重投
+        2. 过滤无关事件和机器人自己的消息
+        3. 下载附件、补线程上下文
+        4. 构造 metadata 与 session_key
+        5. 调用 ``BaseChannel._handle_message()`` 进入统一 Agent 链路
+        """
         if req.type == "interactive":
             await self._on_block_action(client, req)
             return
         if req.type != "events_api":
             return
 
-        # Acknowledge right away
+        # 必须尽快 ACK，否则 Slack 可能会把同一事件重新投递。
         await client.send_socket_mode_response(
             SocketModeResponse(envelope_id=req.envelope_id)
         )
@@ -326,7 +369,7 @@ class SlackChannel(BaseChannel):
         event = payload.get("event") or {}
         event_type = event.get("type")
 
-        # Handle app mentions or plain messages
+        # 这里只关心两类能触发 Agent 的事件：普通 message 与 app_mention。
         if event_type not in ("message", "app_mention"):
             return
 
@@ -334,20 +377,20 @@ class SlackChannel(BaseChannel):
         chat_id = event.get("channel")
 
         subtype = event.get("subtype")
-        # Slack uses subtype=file_share for user messages with attachments.
-        # Ignore other subtypes such as bot_message / message_changed / deleted.
+        # 用户带附件发消息时，Slack 会把 subtype 标成 file_share。
+        # 其他 subtype 多半是机器人消息、编辑事件、删除事件等，这里跳过。
         if subtype and subtype != "file_share":
             return
         if self._bot_user_id and sender_id == self._bot_user_id:
             return
 
-        # Avoid double-processing: Slack sends both `message` and `app_mention`
-        # for mentions in channels. Prefer `app_mention`.
+        # 频道里 @ 机器人时，Slack 可能同时发送 `message` 和 `app_mention`。
+        # 这里统一偏向处理 `app_mention`，避免重复触发。
         text = event.get("text") or ""
         if event_type == "message" and self._bot_user_id and f"<@{self._bot_user_id}>" in text:
             return
 
-        # Debug: log basic event shape
+        # 记录事件基本形态，方便排查 Slack 实际发来了什么 payload。
         self.logger.debug(
             "event: type={} subtype={} user={} channel={} channel_type={} text={}",
             event_type,
@@ -380,16 +423,15 @@ class SlackChannel(BaseChannel):
         event_ts = event.get("ts")
         raw_thread_ts = event.get("thread_ts")
         thread_ts = raw_thread_ts
-        # In DMs we don't auto-open a thread on top-level messages (it would
-        # bury replies under "1 reply"). But if the user explicitly opened a
-        # thread inside the DM, raw_thread_ts is set and we honor it.
+        # 私聊的顶层消息默认不自动新开 thread，否则用户体验很怪；
+        # 但若用户本来就在 DM 中显式使用 thread，就尊重它。
         if (
             self.config.reply_in_thread
             and not thread_ts
             and channel_type != "im"
         ):
             thread_ts = event_ts
-        # Add :eyes: reaction to the triggering message (best-effort)
+        # 给触发消息加一个“正在看/正在处理”的表情，属于体验增强，失败也不影响主流程。
         try:
             if self._web_client and event.get("ts"):
                 await self._web_client.reactions_add(
@@ -400,9 +442,8 @@ class SlackChannel(BaseChannel):
         except Exception as e:
             self.logger.debug("reactions_add failed: {}", e)
 
-        # Thread-scoped session key whenever the user is in a real thread
-        # (raw_thread_ts is set). DM threads get their own session, separate
-        # from the DM root, so context doesn't bleed across thread boundaries.
+        # 真的在线程里对话时，给它一个线程级 session_key。
+        # 这样不同 thread 的上下文不会串在一起。
         session_key = (
             f"slack:{chat_id}:{thread_ts}" if thread_ts and raw_thread_ts else None
         )
@@ -450,7 +491,12 @@ class SlackChannel(BaseChannel):
             self.logger.exception("Error handling message from {}", sender_id)
 
     async def _download_slack_file(self, file_info: dict[str, Any]) -> tuple[str | None, str]:
-        """Download a Slack private file to the local media directory."""
+        """下载 Slack 私有附件到本地媒体目录。
+
+        Slack 附件往往不是公开链接，而是需要带 bot token 才能访问。
+        返回值中的第二项是一个文本标记，例如 ``[image: foo.png]``，
+        方便在聊天上下文里提到这个附件。
+        """
         file_id = str(file_info.get("id") or "file")
         name = str(
             file_info.get("name")
@@ -499,7 +545,10 @@ class SlackChannel(BaseChannel):
         return preview.startswith(_HTML_DOWNLOAD_PREFIXES)
 
     async def _on_block_action(self, client: SocketModeClient, req: SocketModeRequest) -> None:
-        """Handle button clicks from inline action buttons."""
+        """处理 Slack Block Kit 按钮点击事件。
+
+        按钮点击最终会被重新包装成一条新的用户输入，继续走 Agent 的正常消息处理链。
+        """
         await client.send_socket_mode_response(SocketModeResponse(envelope_id=req.envelope_id))
         payload = req.payload or {}
         actions = payload.get("actions") or []
@@ -539,7 +588,10 @@ class SlackChannel(BaseChannel):
         raw_thread_ts: str | None,
         current_ts: str | None,
     ) -> str:
-        """Include thread history the first time the bot is pulled into a Slack thread."""
+        """第一次被拉进某个 Slack thread 时，把此前 thread 历史补进当前输入。
+
+        这样模型看到的不只是当前一句话，还能看到前文线程上下文。
+        """
         del channel_type  # DM and channel threads are both fetched via conversations.replies
         if (
             not self.config.include_thread_context
@@ -576,6 +628,7 @@ class SlackChannel(BaseChannel):
         return "Slack thread context before this mention:\n" + "\n".join(lines) + f"\n\nCurrent message:\n{text}"
 
     def _format_thread_context(self, messages: list[dict[str, Any]], *, current_ts: str | None) -> list[str]:
+        """把 thread 历史压缩成适合拼进 prompt 的简短文本列表。"""
         lines: list[str] = []
         for item in messages:
             if item.get("ts") == current_ts:
@@ -596,7 +649,7 @@ class SlackChannel(BaseChannel):
 
     @staticmethod
     def _build_button_blocks(text: str, buttons: list[list[str]]) -> list[dict[str, Any]]:
-        """Build Slack Block Kit blocks with action buttons."""
+        """构造带按钮的 Slack Block Kit 结构。"""
         blocks: list[dict[str, Any]] = [
             {"type": "section", "text": {"type": "mrkdwn", "text": text[:3000]}},
         ]
@@ -614,7 +667,7 @@ class SlackChannel(BaseChannel):
         return blocks
 
     async def _update_react_emoji(self, chat_id: str, ts: str | None) -> None:
-        """Remove the in-progress reaction and optionally add a done reaction."""
+        """移除“处理中”表情，并按配置补充“完成”表情。"""
         if not self._web_client or not ts:
             return
         try:
@@ -636,6 +689,7 @@ class SlackChannel(BaseChannel):
                 self.logger.debug("done reaction failed: {}", e)
 
     def _is_allowed(self, sender_id: str, chat_id: str, channel_type: str) -> bool:
+        """按 Slack 私聊/群聊不同策略判断是否允许当前消息触发机器人。"""
         if channel_type == "im":
             if not self.config.dm.enabled:
                 return False
@@ -660,8 +714,8 @@ class SlackChannel(BaseChannel):
         return False
 
     def is_allowed(self, sender_id: str) -> bool:
-        # Slack needs channel-aware policy checks, so _on_socket_request and
-        # _on_block_action call _is_allowed before handing off to BaseChannel.
+        # Slack 的权限判断依赖 chat_id 和 channel_type，无法只靠 sender_id 决定。
+        # 所以这里总返回 True，真正检查提前在 _on_socket_request/_on_block_action 里做。
         return True
 
     @staticmethod
@@ -686,7 +740,10 @@ class SlackChannel(BaseChannel):
 
     @classmethod
     def _to_mrkdwn(cls, text: str) -> str:
-        """Convert Markdown to Slack mrkdwn, including tables."""
+        """把通用 Markdown 转成 Slack mrkdwn。
+
+        Slack 的 mrkdwn 不是标准 Markdown，这里额外处理了表格和一些格式修补。
+        """
         if not text:
             return ""
         text = cls._TABLE_RE.sub(cls._convert_table, text)
@@ -694,7 +751,7 @@ class SlackChannel(BaseChannel):
 
     @classmethod
     def _fixup_mrkdwn(cls, text: str) -> str:
-        """Fix markdown artifacts that slackify_markdown misses."""
+        """修补 ``slackify_markdown`` 没有完全处理好的格式残留。"""
         code_blocks: list[str] = []
 
         def _save_code(m: re.Match) -> str:
@@ -713,7 +770,7 @@ class SlackChannel(BaseChannel):
 
     @staticmethod
     def _convert_table(match: re.Match) -> str:
-        """Convert a Markdown table to a Slack-readable list."""
+        """把 Markdown 表格转换成 Slack 中更易读的逐行键值列表。"""
         lines = [ln.strip() for ln in match.group(0).strip().splitlines() if ln.strip()]
         if len(lines) < 2:
             return match.group(0)

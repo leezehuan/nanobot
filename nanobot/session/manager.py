@@ -273,14 +273,14 @@ class Session:
                 used += tokens
             kept.reverse()
 
-            # Keep history aligned to the first visible user turn.
+            # 尽量让裁剪后的历史从第一个可见 user turn 开始。
             first_user = next((i for i, m in enumerate(kept) if m.get("role") == "user"), None)
             if first_user is not None:
                 kept = kept[first_user:]
             else:
-            # token 预算太紧时，可能会只剩 assistant 尾巴。
-            # 这里宁可略微超预算，也尽量把最近的 user turn 找回来。
-            recovered_user = next(
+                # token 预算太紧时，可能会只剩 assistant 尾巴。
+                # 这里宁可略微超预算，也尽量把最近的 user turn 找回来。
+                recovered_user = next(
                     (i for i in range(len(out) - 1, -1, -1) if out[i].get("role") == "user"),
                     None,
                 )

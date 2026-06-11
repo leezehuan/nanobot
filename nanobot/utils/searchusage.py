@@ -1,4 +1,4 @@
-"""Web search provider usage fetchers for /status command."""
+"""搜索额度查询工具：供 ``/status`` 命令展示 Web 搜索 provider 用量。"""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Any
 
 @dataclass
 class SearchUsageInfo:
-    """Structured usage info returned by a provider fetcher."""
+    """某个搜索 provider 的结构化用量信息。"""
 
     provider: str
     supported: bool = False          # True if the provider has a usage API
@@ -27,7 +27,7 @@ class SearchUsageInfo:
     crawl_used: int | None = None
 
     def format(self) -> str:
-        """Return a human-readable multi-line string for /status output."""
+        """格式化成适合 ``/status`` 展示的多行文本。"""
         lines = [f"🔍 Web Search: {self.provider}"]
 
         if not self.supported:
@@ -67,16 +67,7 @@ async def fetch_search_usage(
     provider: str,
     api_key: str | None = None,
 ) -> SearchUsageInfo:
-    """
-    Fetch usage info for the configured web search provider.
-
-    Args:
-        provider: Provider name (e.g. "tavily", "brave", "duckduckgo").
-        api_key:  API key for the provider (falls back to env vars).
-
-    Returns:
-        SearchUsageInfo with populated fields where available.
-    """
+    """查询当前配置搜索 provider 的额度信息。"""
     p = (provider or "duckduckgo").strip().lower()
 
     if p == "tavily":
@@ -86,12 +77,10 @@ async def fetch_search_usage(
         return SearchUsageInfo(provider=p, supported=False)
 
 
-# ---------------------------------------------------------------------------
-# Tavily
-# ---------------------------------------------------------------------------
+# Tavily 是这里真正支持“远程额度查询 API”的 provider。
 
 async def _fetch_tavily_usage(api_key: str | None) -> SearchUsageInfo:
-    """Fetch usage from GET https://api.tavily.com/usage."""
+    """调用 Tavily 的 ``/usage`` 接口读取额度统计。"""
     import httpx
 
     key = api_key or os.environ.get("TAVILY_API_KEY", "")
@@ -126,30 +115,12 @@ async def _fetch_tavily_usage(api_key: str | None) -> SearchUsageInfo:
 
 
 def _parse_tavily_usage(data: dict[str, Any]) -> SearchUsageInfo:
-    """
-    Parse Tavily /usage response.
-
-    Actual API response shape:
-    {
-      "account": {
-        "current_plan": "Researcher",
-        "plan_usage": 20,
-        "plan_limit": 1000,
-        "search_usage": 20,
-        "crawl_usage": 0,
-        "extract_usage": 0,
-        "map_usage": 0,
-        "research_usage": 0,
-        "paygo_usage": 0,
-        "paygo_limit": null
-      }
-    }
-    """
+    """解析 Tavily ``/usage`` 返回的 JSON 结构。"""
     account = data.get("account") or {}
     used = account.get("plan_usage")
     limit = account.get("plan_limit")
 
-    # Compute remaining
+    # 用“总额度 - 已用额度”推算剩余额度。
     remaining = None
     if used is not None and limit is not None:
         remaining = max(0, limit - used)

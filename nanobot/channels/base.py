@@ -83,7 +83,13 @@ class BaseChannel(ABC):
 
     @abstractmethod
     async def stop(self) -> None:
-        """Stop the channel and clean up resources."""
+        """停止渠道并释放相关资源。
+
+        典型清理动作包括：
+        - 断开网络连接
+        - 停止后台任务
+        - 关闭 SDK client / session
+        """
         pass
 
     @abstractmethod
@@ -178,7 +184,7 @@ class BaseChannel(ABC):
             allow_list = getattr(self.config, "allow_from", None) or []
         if "*" in allow_list:
             return True
-        # allowFrom entries are opaque tokens — must match exactly.
+        # allowFrom 里的条目被视为“不透明身份令牌”，这里只做精确匹配，不做模糊推断。
         if str(sender_id) in allow_list:
             return True
         if is_approved(self.name, str(sender_id)):

@@ -1,7 +1,9 @@
-"""Post-run evaluation for background tasks (heartbeat & cron).
+"""后台任务结果评估器：判断 heartbeat / cron 的执行结果是否值得通知用户。
 
-After the agent executes a background task, this module makes a lightweight
-LLM call to decide whether the result warrants notifying the user.
+思路是：
+- 先让后台 Agent 执行任务
+- 再做一次轻量 LLM 调用判断“要不要打扰用户”
+- 避免把例行、空白或无意义结果都推送出去
 """
 
 from __future__ import annotations
@@ -46,10 +48,11 @@ async def evaluate_response(
     model: str,
     default_notify: bool = True,
 ) -> bool:
-    """Decide whether a background-task result should be delivered to the user.
+    """判断后台任务结果是否应该发给用户。
 
-    On any failure, falls back to ``default_notify`` (cron reminders fail open;
-    heartbeat passes ``False`` to fail closed).
+    失败兜底策略由 ``default_notify`` 决定：
+    - cron 往往倾向于“失败时也通知”
+    - heartbeat 往往倾向于“失败时安静忽略”
     """
     try:
         llm_response = await provider.chat_with_retry(

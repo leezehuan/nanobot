@@ -215,7 +215,7 @@ class ChannelManager:
         # 先启动统一出站分发器，再启动各个具体渠道。
         self._dispatch_task = asyncio.create_task(self._dispatch_outbound())
 
-        # Start channels
+        # 再启动各个具体渠道。
         tasks = []
         for name, channel in self.channels.items():
             logger.info("Starting {} channel...", name)
@@ -248,13 +248,13 @@ class ChannelManager:
         """停止所有渠道以及出站分发器。"""
         logger.info("Stopping all channels...")
 
-        # Stop dispatcher
+        # 先停统一出站分发器。
         if self._dispatch_task:
             self._dispatch_task.cancel()
             with suppress(asyncio.CancelledError):
                 await self._dispatch_task
 
-        # Stop all channels
+        # 再依次停止所有渠道实例。
         for name, channel in self.channels.items():
             try:
                 await channel.stop()
@@ -378,9 +378,9 @@ class ChannelManager:
         elif msg.metadata.get("_reasoning_delta"):
             await channel.send_reasoning_delta(msg.chat_id, msg.content, msg.metadata)
         elif msg.metadata.get("_reasoning"):
-            # Back-compat: one-shot reasoning. BaseChannel translates this
-            # to a single delta + end pair so plugins only implement the
-            # streaming primitives.
+            # 向后兼容：老路径可能一次性发送完整 reasoning。
+            # BaseChannel 会把它翻译成“一条 delta + 一条 end”，
+            # 这样插件只实现流式原语即可。
             await channel.send_reasoning(msg)
         elif msg.metadata.get("_file_edit_events"):
             edits = msg.metadata.get("_file_edit_events")
@@ -426,7 +426,7 @@ class ChannelManager:
                 # 如果已经看到流结束标记，就把结束状态带上并停止合并。
                 if is_end:
                     final_metadata["_stream_end"] = True
-                    # Stream ended - stop coalescing this stream
+                    # 这一条流已经结束，不再继续合并后续消息。
                     break
             else:
                 # 第一条不匹配消息定义了当前合并边界。

@@ -1,4 +1,11 @@
-"""Runtime-specific helper functions and constants."""
+"""运行时辅助工具：存放 Agent 执行阶段常用的小型策略函数和提示常量。
+
+这个模块里的东西看起来零散，但其实都服务于“让一轮 Agent 执行更稳定”：
+- 工具结果为空时如何兜底
+- 输出打满时如何提示模型继续
+- 工具预算耗尽后如何强制模型给最终答复
+- 重复外部查询或越权访问时如何限流/拦截
+"""
 
 from __future__ import annotations
 
@@ -12,7 +19,7 @@ from nanobot.utils.helpers import stringify_text_blocks
 
 _MAX_REPEAT_EXTERNAL_LOOKUPS = 2
 
-# Third same-target workspace violation in a turn escalates to "stop retrying".
+# 同一个 turn 里，第 3 次尝试访问同一类工作区外路径时，升级为“明确停止重试”。
 _MAX_REPEAT_WORKSPACE_VIOLATIONS = 2
 
 EMPTY_FINAL_RESPONSE_MESSAGE = (
@@ -44,12 +51,21 @@ SUSTAINED_GOAL_CONTINUE_PROMPT = (
 
 
 def empty_tool_result_message(tool_name: str) -> str:
-    """Short prompt-safe marker for tools that completed without visible output."""
+    """为“工具成功执行但没有可见输出”的情况生成一个短占位文本。
+
+    这样模型在后续整理上下文时，不会把“空字符串”误以为是工具没有运行。
+    """
     return f"({tool_name} completed with no output)"
 
 
 def ensure_nonempty_tool_result(tool_name: str, content: Any) -> Any:
-    """Replace semantically empty tool results with a short marker string."""
+    """把“语义上为空”的工具结果替换成占位文本。
+
+    这里处理的不只是 ``None``，还包括：
+    - 空字符串
+    - 空列表
+    - 由文本块组成、但拼起来仍然全空白的列表
+    """
     if content is None:
         return empty_tool_result_message(tool_name)
     if isinstance(content, str) and not content.strip():
@@ -64,32 +80,43 @@ def ensure_nonempty_tool_result(tool_name: str, content: Any) -> Any:
 
 
 def is_blank_text(content: str | None) -> bool:
-    """True when *content* is missing or only whitespace."""
+    """判断一段文本是否为空或全是空白字符。"""
     return content is None or not content.strip()
 
 
 def build_finalization_retry_message() -> dict[str, str]:
-    """A short no-tools-allowed prompt for final answer recovery."""
+    """构造“不要再调用工具，只补最终答案”的恢复提示。"""
     return {"role": "user", "content": FINALIZATION_RETRY_PROMPT}
 
 
 def build_budget_exhausted_finalization_message() -> dict[str, str]:
-    """Prompt the model for a no-tools final response after budget exhaustion."""
+    """当工具预算耗尽时，构造强制收尾提示。
+
+    它的重点是告诉模型：
+    - 现在不能再调工具
+    - 只能基于现有证据收尾
+    - 不要虚构“已经完成”
+    """
     return {"role": "user", "content": BUDGET_EXHAUSTED_FINALIZATION_PROMPT}
 
 
 def build_length_recovery_message() -> dict[str, str]:
-    """Prompt the model to continue after hitting output token limit."""
+    """当输出长度打满时，提示模型从中断处继续。"""
     return {"role": "user", "content": LENGTH_RECOVERY_PROMPT}
 
 
 def build_goal_continue_message(custom: str | None = None) -> dict[str, str]:
-    """Prompt the model to continue when a sustained goal is still active."""
+    """当 sustained goal 仍处于激活状态时，提示模型继续推进。"""
     return {"role": "user", "content": custom or SUSTAINED_GOAL_CONTINUE_PROMPT}
 
 
 def external_lookup_signature(tool_name: str, arguments: Any) -> str | None:
-    """Stable signature for repeated external lookups we want to throttle."""
+    """为外部查询生成稳定签名，用于识别“重复查同一个目标”。
+
+    例如：
+    - ``web_fetch`` 的同一个 URL
+    - ``web_search`` 的同一个 query
+    """
     if not isinstance(arguments, dict):
         return None
     if tool_name == "web_fetch":
@@ -108,7 +135,10 @@ def repeated_external_lookup_error(
     arguments: Any,
     seen_counts: dict[str, int],
 ) -> str | None:
-    """Block repeated external lookups after a small retry budget."""
+    """在短时间内重复查同一个外部目标时返回拦截错误。
+
+    目的不是完全禁止联网，而是防止模型在失败后机械地重复同一次搜索/抓取。
+    """
     signature = external_lookup_signature(tool_name, arguments)
     if signature is None:
         return None
@@ -127,7 +157,7 @@ def repeated_external_lookup_error(
     )
 
 
-# Workspace-boundary violations are soft errors, with per-target throttling.
+# 工作区越界访问先按“软错误”处理，但会对同一目标做节流与升级。
 
 _OUTSIDE_PATH_PATTERN = re.compile(r"(?:^|[\s|>'\"])((?:/[^\s\"'>;|<]+)|(?:~[^\s\"'>;|<]+))")
 
@@ -136,7 +166,14 @@ def workspace_violation_signature(
     tool_name: str,
     arguments: Any,
 ) -> str | None:
-    """Return a stable cross-tool signature for the outside-workspace target."""
+    """为“工作区外访问目标”生成跨工具通用签名。
+
+    这样无论模型尝试用：
+    - 文件工具
+    - shell / exec
+    - source / destination 参数
+    只要本质上指向同一个越界路径，都会落到同一计数器上。
+    """
     if not isinstance(arguments, dict):
         return None
     for key in ("path", "file_path", "target", "source", "destination"):
@@ -158,7 +195,7 @@ def workspace_violation_signature(
 
 
 def _normalize_violation_target(raw: str) -> str:
-    """Normalize *raw* path so that equivalent spellings collide on the same key."""
+    """规范化路径写法，让等价路径命中同一个签名键。"""
     try:
         normalized = Path(raw).expanduser().resolve().as_posix()
     except Exception:
@@ -171,7 +208,10 @@ def repeated_workspace_violation_error(
     arguments: Any,
     seen_counts: dict[str, int],
 ) -> str | None:
-    """Return an escalated error after repeated bypass attempts."""
+    """重复尝试越过工作区边界时，返回更强硬的错误提示。
+
+    这里的目标是让模型停止“换个参数再试一次”的无效尝试。
+    """
     signature = workspace_violation_signature(tool_name, arguments)
     if signature is None:
         return None

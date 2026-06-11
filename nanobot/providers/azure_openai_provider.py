@@ -1,20 +1,11 @@
-"""Azure OpenAI provider using the OpenAI SDK Responses API.
+"""Azure OpenAI Provider：通过 OpenAI Python SDK 调用 Azure 上的 Responses API。
 
-Uses ``AsyncOpenAI`` pointed at ``https://{endpoint}/openai/v1/`` which
-routes to the Responses API (``/responses``).  Reuses shared conversion
-helpers from :mod:`nanobot.providers.openai_responses`.
+这个 provider 复用了 OpenAI SDK，但把 ``base_url`` 指向 Azure 的：
+``https://{endpoint}/openai/v1/``
 
-Authentication
---------------
-Two modes are supported, selected automatically:
-
-1. **Static API key** — when ``api_key`` is non-empty it is sent as the
-   ``api-key`` / ``Authorization: Bearer`` header (existing behavior).
-2. **Microsoft Entra ID (AAD)** — when ``api_key`` is empty the provider
-   falls back to :class:`azure.identity.aio.DefaultAzureCredential` and
-   acquires a bearer token scoped to
-   ``https://cognitiveservices.azure.com/.default``.  ``azure-identity``
-   is an optional dependency installed via ``pip install nanobot-ai[azure]``.
+它支持两种认证模式：
+1. 传统 API Key
+2. Microsoft Entra ID（AAD）动态换取 bearer token
 """
 
 from __future__ import annotations
@@ -37,16 +28,11 @@ _AZURE_OPENAI_SCOPE = "https://cognitiveservices.azure.com/.default"
 
 
 class _AzureTokenProvider:
-    """Async bearer-token callback for AAD authentication.
+    """为 Azure AAD 认证提供异步 bearer token 的小包装器。
 
-    Thin wrapper around :class:`azure.identity.aio.DefaultAzureCredential`
-    that exposes itself as an async callable returning a fresh bearer
-    token.  The Azure SDK's own MSAL-backed token cache already returns
-    valid tokens without network calls, so no extra caching is layered on
-    top here.
-
-    Raises ``RuntimeError`` with a clear install hint if
-    ``azure-identity`` is not installed.
+    OpenAI SDK 允许把 ``api_key`` 传成一个异步可调用对象；
+    SDK 会在每次请求时调用它，拿到最新 token。
+    这个类就是为此服务的。
     """
 
     def __init__(self, scope: str = _AZURE_OPENAI_SCOPE) -> None:
@@ -62,12 +48,12 @@ class _AzureTokenProvider:
         self._credential = DefaultAzureCredential()
 
     async def __call__(self) -> str:
-        """Return a bearer token for the configured scope."""
+        """返回当前 scope 对应的 bearer token。"""
         access_token = await self._credential.get_token(self._scope)
         return access_token.token
 
     async def aclose(self) -> None:
-        """Release credential resources.  Safe to call multiple times."""
+        """释放凭证对象占用的资源；重复调用也是安全的。"""
         close = getattr(self._credential, "close", None)
         if close is not None:
             try:
@@ -77,17 +63,7 @@ class _AzureTokenProvider:
 
 
 class AzureOpenAIProvider(LLMProvider):
-    """Azure OpenAI provider backed by the Responses API.
-
-    Features:
-    - Uses the OpenAI Python SDK (``AsyncOpenAI``) with
-      ``base_url = {endpoint}/openai/v1/``
-    - Calls ``client.responses.create()`` (Responses API)
-    - Reuses shared message/tool/SSE conversion from
-      ``openai_responses``
-    - Falls back to :class:`DefaultAzureCredential` (AAD) when ``api_key``
-      is empty.  See module docstring for details.
-    """
+    """基于 Azure Responses API 的 Azure OpenAI Provider。"""
 
     def __init__(
         self,
@@ -101,15 +77,14 @@ class AzureOpenAIProvider(LLMProvider):
         if not api_base:
             raise ValueError("Azure OpenAI api_base is required")
 
-        # Normalise: ensure trailing slash
+        # 统一补齐末尾斜杠，后面构造 base_url 时更稳定。
         if not api_base.endswith("/"):
             api_base += "/"
         self.api_base = api_base
 
-        # Select auth mode.  A truthy api_key wins; otherwise fall back to
-        # AAD via DefaultAzureCredential.  The OpenAI SDK accepts an async
-        # callable as ``api_key`` and invokes it per request, using the
-        # returned string as the bearer token.
+        # 认证模式选择：
+        # - 若传了 api_key，就走传统静态密钥
+        # - 否则退回到 AAD，按请求动态取 bearer token
         self._token_provider: _AzureTokenProvider | None = None
         client_api_key: str | Callable[[], Awaitable[str]]
         if api_key:
@@ -118,7 +93,7 @@ class AzureOpenAIProvider(LLMProvider):
             self._token_provider = _AzureTokenProvider()
             client_api_key = self._token_provider
 
-        # SDK client targeting the Azure Responses API endpoint
+        # 底层仍然用 OpenAI SDK client，只是目标端点改成 Azure。
         base_url = f"{api_base.rstrip('/')}/openai/v1/"
         self._client = AsyncOpenAI(
             api_key=client_api_key,
@@ -127,16 +102,14 @@ class AzureOpenAIProvider(LLMProvider):
             max_retries=0,
         )
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
+    # 辅助方法：负责识别能力差异、组装请求体、统一错误处理。
 
     @staticmethod
     def _supports_temperature(
         deployment_name: str,
         reasoning_effort: str | None = None,
     ) -> bool:
-        """Return True when temperature is likely supported for this deployment."""
+        """判断当前 Azure deployment 大概率是否支持 ``temperature`` 参数。"""
         if reasoning_effort and reasoning_effort.lower() != "none":
             return False
         name = deployment_name.lower()
@@ -152,7 +125,7 @@ class AzureOpenAIProvider(LLMProvider):
         reasoning_effort: str | None,
         tool_choice: str | dict[str, Any] | None,
     ) -> dict[str, Any]:
-        """Build the Responses API request body from Chat-Completions-style args."""
+        """把 Chat-Completions 风格参数组装成 Azure Responses API 请求体。"""
         deployment = model or self.default_model
         instructions, input_items = convert_messages(self._sanitize_empty_content(messages))
 
@@ -180,6 +153,7 @@ class AzureOpenAIProvider(LLMProvider):
 
     @staticmethod
     def _handle_error(e: Exception) -> LLMResponse:
+        """把 SDK / HTTP 异常统一转换成 ``LLMResponse`` 错误对象。"""
         response = getattr(e, "response", None)
         body = getattr(e, "body", None) or getattr(response, "text", None)
         body_text = str(body).strip() if body is not None else ""
@@ -189,9 +163,7 @@ class AzureOpenAIProvider(LLMProvider):
             retry_after = LLMProvider._extract_retry_after(msg)
         return LLMResponse(content=msg, finish_reason="error", retry_after=retry_after)
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    # 对外公开接口：实现 LLMProvider 规定的 chat / chat_stream / get_default_model。
 
     async def chat(
         self,
@@ -203,6 +175,7 @@ class AzureOpenAIProvider(LLMProvider):
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
     ) -> LLMResponse:
+        """非流式调用 Azure Responses API。"""
         body = self._build_body(
             messages, tools, model, max_tokens, temperature,
             reasoning_effort, tool_choice,
@@ -227,6 +200,7 @@ class AzureOpenAIProvider(LLMProvider):
         on_tool_call_delta: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> LLMResponse:
         _ = on_thinking_delta
+        """流式调用 Azure Responses API，并消费 SDK stream。"""
         body = self._build_body(
             messages, tools, model, max_tokens, temperature,
             reasoning_effort, tool_choice,

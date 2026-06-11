@@ -1,8 +1,9 @@
-"""Shared helpers for decoding ``data:...;base64,...`` URLs to disk.
+"""媒体解码工具：把 ``data:...;base64,...`` URL 保存成真实文件。
 
-Historically lived in ``nanobot.api.server``; now shared by the WebSocket
-channel so the ``api`` + ``websocket`` ingress paths apply the same parsing,
-size guard, and filesystem layout.
+这个模块被 API server 与 WebSocket 渠道共享，保证不同入口都使用同一套：
+- data URL 解析规则
+- 文件大小限制
+- 文件落盘命名方式
 """
 
 from __future__ import annotations
@@ -20,9 +21,8 @@ MAX_FILE_SIZE = DEFAULT_MAX_BYTES
 
 _DATA_URL_RE = re.compile(r"^data:([^;,]+)(?:;[^,]*)*;base64,(.+)$", re.DOTALL)
 _MIME_EXTENSION_OVERRIDES = {
-    # Python's ``mimetypes`` maps browser-recorded audio/webm to ``.weba`` and
-    # audio/ogg to ``.oga`` on macOS. Some transcription APIs validate by the
-    # file extension and accept the canonical container extensions instead.
+    # Python 的 mimetypes 在某些平台上会返回比较冷门的扩展名，
+    # 但部分转写 API 会严格校验后缀，所以这里手动改成更常见的容器后缀。
     "application/ogg": ".ogg",
     "audio/ogg": ".ogg",
     "audio/mpga": ".mpga",
@@ -36,7 +36,7 @@ _MIME_EXTENSION_OVERRIDES = {
 
 
 class FileSizeExceededError(Exception):
-    """Raised when a decoded payload exceeds the caller's size limit."""
+    """解码后的 payload 超过大小上限时抛出的异常。"""
 
 
 FileSizeExceeded = FileSizeExceededError
@@ -48,11 +48,12 @@ def save_base64_data_url(
     *,
     max_bytes: int | None = None,
 ) -> str | None:
-    """Decode a ``data:<mime>;base64,<payload>`` URL and persist it.
+    """解码 ``data:<mime>;base64,<payload>`` URL，并把结果写入磁盘。
 
-    Returns the absolute path on success, ``None`` when the URL shape or the
-    base64 payload itself is malformed. Raises :class:`FileSizeExceeded`
-    when the decoded payload is larger than ``max_bytes`` (default 10 MB).
+    返回：
+    - 成功：保存后的绝对路径
+    - URL 形状或 base64 内容非法：``None``
+    - 超过大小限制：抛 ``FileSizeExceeded``
     """
     m = _DATA_URL_RE.match(data_url)
     if not m:

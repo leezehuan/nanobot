@@ -732,8 +732,8 @@ class WebSearchTool(Tool):
 
     async def _search_duckduckgo(self, query: str, n: int) -> str:
         try:
-            # Note: duckduckgo_search is synchronous and does its own requests
-            # We run it in a thread to avoid blocking the loop
+            # 注意：duckduckgo_search 是同步库，而且会自己发请求；
+            # 这里把它放进线程里执行，避免阻塞事件循环。
             from ddgs import DDGS
 
             ddgs = DDGS(timeout=10)

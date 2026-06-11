@@ -1,8 +1,11 @@
-"""Sandbox backends for shell command execution.
+"""Shell 命令执行的沙箱后端。
 
-To add a new backend, implement a function with the signature:
-    _wrap_<name>(command: str, workspace: str, cwd: str) -> str
-and register it in _BACKENDS below.
+这个模块的职责很单一：把原始命令包装成“在某种沙箱里运行”的命令字符串。
+
+如果以后要新增沙箱后端，约定是：
+
+- 实现 ``_wrap_<name>(command, workspace, cwd) -> str``
+- 再把它注册到下面的 ``_BACKENDS`` 里
 """
 
 import shlex
@@ -12,11 +15,13 @@ from nanobot.config.paths import get_media_dir
 
 
 def _bwrap(command: str, workspace: str, cwd: str) -> str:
-    """Wrap command in a bubblewrap sandbox (requires bwrap in container).
+    """用 bubblewrap 包装命令，使其在受限沙箱里执行。
 
-    Only the workspace is bind-mounted read-write; its parent dir (which holds
-    config.json) is hidden behind a fresh tmpfs.  The media directory is
-    bind-mounted read-only so exec commands can read uploaded attachments.
+    关键思路：
+
+    - 只有 workspace 会被以可读写方式挂进去
+    - workspace 的父目录会被一个新的 tmpfs 遮住，避免顺手看到配置目录
+    - media 目录只读挂载，让命令可以读取上传附件，但不能随意改
     """
     ws = Path(workspace).resolve()
     media = get_media_dir().resolve()
@@ -44,10 +49,10 @@ def _bwrap(command: str, workspace: str, cwd: str) -> str:
         args += ["--ro-bind-try", p, p]
     args += [
         "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
-        "--tmpfs", str(ws.parent),        # mask config dir
-        "--dir", str(ws),                 # recreate workspace mount point
+        "--tmpfs", str(ws.parent),        # 遮住配置目录所在父目录
+        "--dir", str(ws),                 # 重新创建 workspace 挂载点
         "--bind", str(ws), str(ws),
-        "--ro-bind-try", str(media), str(media),  # read-only access to media
+        "--ro-bind-try", str(media), str(media),  # 只读访问媒体目录
         "--chdir", sandbox_cwd,
         "--", "sh", "-c", command,
     ]
@@ -58,7 +63,7 @@ _BACKENDS = {"bwrap": _bwrap}
 
 
 def wrap_command(sandbox: str, command: str, workspace: str, cwd: str) -> str:
-    """Wrap *command* using the named sandbox backend."""
+    """按名字选择对应沙箱后端来包装命令。"""
     if backend := _BACKENDS.get(sandbox):
         return backend(command, workspace, cwd)
     raise ValueError(f"Unknown sandbox backend {sandbox!r}. Available: {list(_BACKENDS)}")

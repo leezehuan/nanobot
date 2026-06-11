@@ -1,4 +1,15 @@
-"""OpenAI-compatible provider for all non-Anthropic LLM APIs."""
+"""OpenAI 兼容 Provider：统一接入大量“类 OpenAI”模型服务。
+
+这是 nanobot 里最重要的 Provider 实现之一，因为很多后端都会被收敛到这里，
+例如各类 OpenAI-compatible 网关、本地模型服务、以及部分第三方平台。
+
+你可以把这个文件理解成“OpenAI 方言翻译器 + 稳定性增强层”，它主要负责：
+
+1. 把 nanobot 内部统一消息格式转换成 OpenAI / Responses API 请求
+2. 兼容不同厂商在 tool call、thinking、reasoning、timeout 上的细微差异
+3. 在 Responses API 和传统 chat.completions 之间做策略选择与回退
+4. 统一解析返回结果，产出 nanobot 内部标准 ``LLMResponse``
+"""
 
 from __future__ import annotations
 
@@ -38,9 +49,9 @@ if TYPE_CHECKING:
 
     from nanobot.providers.registry import ProviderSpec
 
-# Module-level placeholder — set lazily by _ensure_client on first real
-# use, or replaced by tests via ``patch(...)``.  Kept as a plain name so
-# that ``unittest.mock.patch`` can find and replace it.
+# 模块级占位符：真正第一次用到时才懒加载 AsyncOpenAI。
+# 之所以保留成模块级名字，而不是藏进类属性里，
+# 是为了让测试里的 ``unittest.mock.patch`` 更容易替换它。
 AsyncOpenAI: Any = None
 
 _ALLOWED_MSG_KEYS = frozenset({
@@ -61,9 +72,8 @@ _KIMI_THINKING_MODELS: frozenset[str] = frozenset({
     "kimi-k2.6",
     "k2.6-code-preview",
 })
-# Thinking-capable MiMo models per Xiaomi docs (see
-# tests/providers/test_xiaomi_mimo_thinking.py). mimo-v2-flash is omitted
-# because it does not support thinking.
+# 按小米文档整理出的支持 thinking 的 MiMo 模型集合。
+# mimo-v2-flash 没放进来，因为它不支持 thinking。
 _MIMO_THINKING_MODELS: frozenset[str] = frozenset({
     "mimo-v2.5-pro",
     "mimo-v2.5",
@@ -72,9 +82,9 @@ _MIMO_THINKING_MODELS: frozenset[str] = frozenset({
 })
 _OPENAI_COMPAT_REQUEST_TIMEOUT_S = 120.0
 
-# Maps ProviderSpec.thinking_style → extra_body builder.
-# Each builder takes a bool (thinking_enabled) and returns the dict to
-# merge into extra_body, keeping the style→wire-format mapping in one place.
+# 把 ``ProviderSpec.thinking_style`` 映射到具体的 extra_body 生成函数。
+# 这样“thinking 功能如何落到各家 wire format”就集中收敛在这一处，
+# 而不是散落在请求构造逻辑各处。
 _THINKING_STYLE_MAP: dict[str, Any] = {
     "thinking_type": lambda on: {"thinking": {"type": "enabled" if on else "disabled"}},
     "enable_thinking": lambda on: {"enable_thinking": on},
@@ -94,7 +104,7 @@ def _model_slug(model_name: str) -> str:
 
 
 def _requires_max_completion_tokens(model_name: str) -> bool:
-    """Return True for models that reject ``max_tokens`` (GPT-5 family, o-series)."""
+    """判断某些模型是否必须使用 ``max_completion_tokens`` 而不能用 ``max_tokens``。"""
     slug = _model_slug(model_name)
     return "gpt-5" in slug or any(
         slug == p or slug.startswith((p + "-", p + ".")) for p in ("o1", "o3", "o4")
@@ -128,7 +138,7 @@ def _gateway_reasoning_extra_body(style: str, effort: str | None) -> dict[str, A
 
 
 def _openai_compat_timeout_s() -> float:
-    """Return the bounded request timeout used for OpenAI-compatible providers."""
+    """返回 OpenAI-compatible Provider 使用的统一请求超时。"""
     return _float_env("NANOBOT_OPENAI_COMPAT_TIMEOUT_S", _OPENAI_COMPAT_REQUEST_TIMEOUT_S)
 
 
@@ -153,14 +163,14 @@ def _short_tool_id() -> str:
 
 
 def _get(obj: Any, key: str) -> Any:
-    """Get a value from dict or object attribute, returning None if absent."""
+    """同时兼容 dict / 对象属性两种读取方式。"""
     if isinstance(obj, dict):
         return obj.get(key)
     return getattr(obj, key, None)
 
 
 def _coerce_dict(value: Any) -> dict[str, Any] | None:
-    """Try to coerce *value* to a dict; return None if not possible or empty."""
+    """尽量把任意对象转成 dict；失败或为空时返回 ``None``。"""
     if value is None:
         return None
     if isinstance(value, dict):
@@ -178,10 +188,15 @@ def _extract_tc_extras(tc: Any) -> tuple[
     dict[str, Any] | None,
     dict[str, Any] | None,
 ]:
-    """Extract (extra_content, provider_specific_fields, fn_provider_specific_fields).
+    """提取工具调用中的扩展字段。
 
-    Works for both SDK objects and dicts.  Captures Gemini ``extra_content``
-    verbatim and any non-standard keys on the tool-call / function.
+    返回三元组：
+
+    - ``extra_content``
+    - ``provider_specific_fields``
+    - ``function_provider_specific_fields``
+
+    这样 nanobot 即使面对某些厂商的非标准字段，也能尽量无损保存下来。
     """
     extra_content = _coerce_dict(_get(tc, "extra_content"))
 
@@ -209,7 +224,7 @@ def _extract_tc_extras(tc: Any) -> tuple[
 
 
 def _uses_openrouter_attribution(spec: "ProviderSpec | None", api_base: str | None) -> bool:
-    """Apply Nanobot attribution headers to OpenRouter requests by default."""
+    """判断当前请求是否应该默认带上 OpenRouter attribution headers。"""
     if spec and spec.name == "openrouter":
         return True
     return bool(api_base and "openrouter" in api_base.lower())
@@ -223,12 +238,7 @@ def _is_local_endpoint(
     spec: "ProviderSpec | None",
     api_base: str | None,
 ) -> bool:
-    """Return True when the endpoint is a local or LAN model server.
-
-    Matches either the provider spec's ``is_local`` flag or common private-
-    network patterns in the base URL (localhost, 127.x, 192.168.x, 10.x,
-    172.16-31.x, Docker ``host.docker.internal``).
-    """
+    """判断当前 endpoint 是否是本地或局域网模型服务。"""
     if spec and spec.is_local:
         return True
     if not api_base:
@@ -251,7 +261,7 @@ def _is_local_endpoint(
 
 
 def _is_direct_openai_base(api_base: str | None) -> bool:
-    """Return True for direct OpenAI endpoints, not generic OpenAI-compatible gateways."""
+    """判断 base URL 是否直连 OpenAI 官方，而不是某个兼容网关。"""
     if not api_base:
         return True
     normalized = api_base.strip().lower().rstrip("/")
@@ -269,11 +279,7 @@ def _responses_circuit_key(
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    """Recursively merge *override* into *base*, returning a new dict.
-
-    Nested dicts are merged key-by-key; all other types in *override*
-    replace the corresponding key in *base*.
-    """
+    """递归合并两个 dict，返回新对象。"""
     merged = dict(base)
     for key, value in override.items():
         if (
@@ -288,7 +294,7 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 
 
 def _merge_unique_list(base: Any, override: Any) -> Any:
-    """Append list values while preserving order and removing duplicates."""
+    """合并两个列表，保持顺序并去重。"""
     if not isinstance(base, list) or not isinstance(override, list):
         return override
     result: list[Any] = []
@@ -309,7 +315,7 @@ def _merge_responses_extra_body(
     body: dict[str, Any],
     extra_body: dict[str, Any],
 ) -> dict[str, Any]:
-    """Merge configured Responses API body fields without clobbering tools."""
+    """合并 Responses API 的 extra_body，同时尽量不破坏 tools/include 等关键字段。"""
     reserved = {"include", "tools"}
     regular_extra = {key: value for key, value in extra_body.items() if key not in reserved}
     merged = _deep_merge(body, regular_extra)
@@ -367,32 +373,28 @@ class OpenAICompatProvider(LLMProvider):
         self._api_key_for_client = api_key or "no-key"
         self._is_local = _is_local_endpoint(spec, effective_base)
 
-        # Lazy-init: the OpenAI client and its httpx transport are expensive
-        # to create (~700 ms on Windows). Defer until first use.
+        # 懒初始化：OpenAI client 连同底层 httpx transport 创建成本不低，
+        # 所以等第一次真正请求时再建。
         self._client: AsyncOpenAIType | None = None
         self._client_lock = asyncio.Lock()
 
-        # Responses API circuit breaker: skip after repeated failures,
-        # probe again after _RESPONSES_PROBE_INTERVAL_S seconds.
+        # Responses API 熔断器：
+        # 如果某个模型/模式连续失败，就先临时停用 Responses API，
+        # 一段时间后再尝试探测恢复。
         self._responses_failures: dict[str, int] = {}
         self._responses_tripped_at: dict[str, float] = {}
 
     def _build_client(self) -> None:
-        """Create the OpenAI client using the current module-level AsyncOpenAI."""
+        """基于当前模块级 ``AsyncOpenAI`` 构建真实 client。"""
         import httpx
 
         timeout_s = _openai_compat_timeout_s()
         http_client: httpx.AsyncClient | None = None
         if self._is_local:
-            # Local model servers (Ollama, llama.cpp, vLLM) often close idle
-            # HTTP connections before the client-side keepalive expires. When
-            # two LLM calls happen seconds apart (e.g. heartbeat _decide then
-            # process_direct), the second call may grab a now-dead pooled
-            # connection, causing a transient APIConnectionError on every first
-            # attempt. Disabling keepalive for local endpoints avoids this by
-            # opening a fresh connection for each request, which is cheap on a
-            # LAN. Cloud providers benefit from keepalive, so we leave the
-            # default pool settings for them.
+            # 本地模型服务（Ollama、llama.cpp、vLLM）常常比客户端更早关闭空闲连接。
+            # 如果保留 keepalive，下一次请求可能恰好复用到“已经死掉的连接”，
+            # 造成首次请求偶发失败。对本地/LAN 服务，关闭 keepalive 成本很低，
+            # 但能显著降低这种伪随机连接错误。
             http_client = httpx.AsyncClient(
                 limits=httpx.Limits(keepalive_expiry=0),
                 timeout=timeout_s,
@@ -408,7 +410,7 @@ class OpenAICompatProvider(LLMProvider):
         )
 
     async def _ensure_client(self):
-        """Return the shared OpenAI client, creating it on first call."""
+        """返回共享 OpenAI client；若不存在则在首次调用时创建。"""
         if self._client is not None:
             return self._client
         async with self._client_lock:
@@ -431,7 +433,7 @@ class OpenAICompatProvider(LLMProvider):
             return self._client
 
     def _setup_env(self, api_key: str, api_base: str | None) -> None:
-        """Set environment variables based on provider spec."""
+        """按 ProviderSpec 约定补齐环境变量。"""
         spec = self._spec
         if not spec or not spec.env_key:
             return
@@ -450,7 +452,7 @@ class OpenAICompatProvider(LLMProvider):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None]:
-        """Inject cache_control markers for prompt caching."""
+        """为支持 prompt caching 的 provider 注入 ``cache_control`` 标记。"""
         cache_marker = {"type": "ephemeral"}
         new_messages = list(messages)
 
@@ -480,7 +482,7 @@ class OpenAICompatProvider(LLMProvider):
 
     @staticmethod
     def _normalize_tool_call_id(tool_call_id: Any) -> Any:
-        """Normalize to a provider-safe 9-char alphanumeric form."""
+        """把工具调用 ID 规范化为 provider 更容易接受的短字母数字形式。"""
         if not isinstance(tool_call_id, str):
             return tool_call_id
         if len(tool_call_id) == 9 and tool_call_id.isalnum():
@@ -488,12 +490,12 @@ class OpenAICompatProvider(LLMProvider):
         return hashlib.sha1(tool_call_id.encode()).hexdigest()[:9]
 
     def _should_normalize_tool_call_ids(self) -> bool:
-        """Return True for providers that reject normal OpenAI tool call IDs."""
+        """判断当前 provider 是否需要规范化工具调用 ID。"""
         return bool(self._spec and self._spec.name == "mistral")
 
     @staticmethod
     def _coerce_content_to_string(content: Any) -> str | None:
-        """Coerce block/list content into plain text for strict string-only APIs."""
+        """把 block/list 形式内容尽量压平成纯文本，供只接受字符串的 API 使用。"""
         if content is None or isinstance(content, str):
             return content
         text = OpenAICompatProvider._extract_text_content(content)
@@ -506,7 +508,7 @@ class OpenAICompatProvider(LLMProvider):
         return dumped or "(empty)"
 
     def _sanitize_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Strip non-standard keys, normalize tool_call IDs."""
+        """清洗消息：去掉非标准字段，并在需要时规范化 tool_call ID。"""
         sanitized = LLMProvider._sanitize_request_messages(messages, _ALLOWED_MSG_KEYS)
         id_map: dict[str, str] = {}
         pending_tool_ids: dict[str, deque[str]] = {}

@@ -1,4 +1,10 @@
-"""Anthropic provider — direct SDK integration for Claude models."""
+"""Anthropic Provider：直接对接 Claude 原生 SDK。
+
+和 OpenAI-compatible Provider 不同，这里不是走“兼容层”，
+而是直接按 Anthropic Messages API 的规则来组消息、发请求、收流式结果。
+
+这个文件很适合学习“不同大模型厂商的消息协议到底哪里不一样”。
+"""
 
 from __future__ import annotations
 
@@ -126,13 +132,13 @@ class AnthropicProvider(LLMProvider):
         return model
 
     # ------------------------------------------------------------------
-    # Message conversion: OpenAI chat format → Anthropic Messages API
+    # 消息格式转换：OpenAI chat 格式 -> Anthropic Messages API
     # ------------------------------------------------------------------
 
     def _convert_messages(
         self, messages: list[dict[str, Any]],
     ) -> tuple[str | list[dict[str, Any]], list[dict[str, Any]]]:
-        """Return ``(system, anthropic_messages)``."""
+        """把 nanobot 内部消息转换成 Anthropic 所需的 ``(system, messages)``。"""
         system: str | list[dict[str, Any]] = ""
         raw: list[dict[str, Any]] = []
 
@@ -221,7 +227,7 @@ class AnthropicProvider(LLMProvider):
 
     @staticmethod
     def _convert_user_content(content: Any) -> Any:
-        """Convert user message content, translating image_url blocks."""
+        """转换用户消息内容，并把 ``image_url`` 块改写成 Anthropic 图片块。"""
         if isinstance(content, str) or content is None:
             return content or "(empty)"
         if not isinstance(content, list):
@@ -238,10 +244,9 @@ class AnthropicProvider(LLMProvider):
                     result.append(converted)
                 continue
             if not item.get("type"):
-                # Anthropic requires every content block to declare a "type".
-                # A tool that returned a bare dict (or a list of dicts) lands
-                # here; coerce it to a text block instead of emitting a block
-                # the API rejects with "content.0.type: Field required".
+                # Anthropic 要求每个 content block 都显式带 ``type``。
+                # 如果某个工具返回了裸 dict，这里宁可把它包成 text block，
+                # 也不要把非法结构直接发给 API。
                 result.append({"type": "text", "text": str(item)})
                 continue
             result.append(item)
@@ -249,7 +254,7 @@ class AnthropicProvider(LLMProvider):
 
     @staticmethod
     def _convert_image_block(block: dict[str, Any]) -> dict[str, Any] | None:
-        """Convert OpenAI image_url block to Anthropic image block."""
+        """把 OpenAI 风格 ``image_url`` block 转成 Anthropic 风格图片块。"""
         url = (block.get("image_url") or {}).get("url", "")
         if not url:
             return None
@@ -266,11 +271,7 @@ class AnthropicProvider(LLMProvider):
 
     @staticmethod
     def _has_tool_use(msg: dict[str, Any]) -> bool:
-        """True if ``msg.content`` carries any ``tool_use`` block.
-
-        Anthropic forbids ``tool_use`` inside ``user`` turns, so messages that
-        issued a tool call cannot be safely rerouted when we patch the role.
-        """
+        """判断消息里是否包含 ``tool_use`` block。"""
         content = msg.get("content")
         if not isinstance(content, list):
             return False
@@ -281,23 +282,16 @@ class AnthropicProvider(LLMProvider):
 
     @staticmethod
     def _merge_consecutive(msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Normalize a message sequence for Anthropic's ``/messages`` endpoint.
+        """把消息序列规范化成 Anthropic ``/messages`` 可接受的形式。
 
-        Anthropic's contract is stricter than OpenAI's:
+        Anthropic 对消息序列的要求比 OpenAI 更严格：
 
-        1. Consecutive same-role turns must be collapsed into one.
-        2. The conversation cannot end with an ``assistant`` turn — Anthropic
-           does not support assistant-message prefill and returns 400.
-        3. The conversation cannot start with an ``assistant`` turn — the
-           first message must be ``user``.
+        1. 连续相同 role 的消息要合并
+        2. 对话不能以 assistant 结尾
+        3. 对话不能以 assistant 开头
 
-        Rules 2 and 3 mirror ``LLMProvider._enforce_role_alternation`` in
-        ``base.py``, which applies the equivalent invariants to OpenAI-compat
-        providers.  The only Anthropic-specific wrinkle: ``tool_use`` blocks
-        live inside ``content`` (not a separate ``tool_calls`` field) and are
-        invalid inside ``user`` turns, so the recovery paths below must skip
-        any message carrying them rather than silently producing a malformed
-        request.
+        此外，Anthropic 的 ``tool_use`` block 是放在 ``content`` 里的，
+        不能像 OpenAI 那样简单地只看 ``tool_calls`` 字段。
         """
         merged: list[dict[str, Any]] = []
         for msg in msgs:
@@ -314,15 +308,13 @@ class AnthropicProvider(LLMProvider):
             else:
                 merged.append(msg)
 
-        # Rule 2: strip trailing assistant turns — Anthropic rejects prefill.
+        # 规则 2：去掉尾部 assistant 预填充消息，Anthropic 不接受这种结尾。
         last_popped: dict[str, Any] | None = None
         while merged and merged[-1].get("role") == "assistant":
             last_popped = merged.pop()
 
-        # Recovery for rule 2: if stripping removed every turn, reroute the
-        # last popped assistant as a user turn so upstream code still gets a
-        # valid request instead of a secondary "messages array empty" 400.
-        # Skip when the message carried ``tool_use`` blocks (see _has_tool_use).
+        # 修复策略：如果删完后整段历史空了，就尽量把最后一条 assistant
+        # 转成 user，避免直接变成空 messages 数组。
         if (
             not merged
             and last_popped is not None
@@ -330,12 +322,9 @@ class AnthropicProvider(LLMProvider):
         ):
             merged.append({"role": "user", "content": last_popped.get("content")})
 
-        # Rule 3: prepend a synthetic opener if the first surviving turn is an
-        # assistant (e.g. upstream history truncation dropped the original
-        # user request).  ``tool_use``-carrying assistants are left alone —
-        # that message will still fail validation, but injecting an opener
-        # before it would orphan the tool_use/tool_result pair that follows,
-        # turning a recoverable 400 into a harder-to-diagnose one.
+        # 规则 3：如果第一条是 assistant，就补一条合成 user opener。
+        # 但如果 assistant 里带 tool_use，就别乱补，避免把 tool_use/tool_result
+        # 关系打乱，造成更难定位的问题。
         if (
             merged
             and merged[0].get("role") == "assistant"
@@ -346,7 +335,7 @@ class AnthropicProvider(LLMProvider):
         return merged
 
     # ------------------------------------------------------------------
-    # Tool definition conversion
+    # 工具定义转换
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -426,7 +415,7 @@ class AnthropicProvider(LLMProvider):
         return system, new_msgs, new_tools
 
     # ------------------------------------------------------------------
-    # Build API kwargs
+    # 构建 API 请求参数
     # ------------------------------------------------------------------
 
     def _build_kwargs(
@@ -452,8 +441,8 @@ class AnthropicProvider(LLMProvider):
         max_tokens = max(1, max_tokens)
         thinking_enabled = bool(reasoning_effort) and reasoning_effort.lower() != "none"
 
-        # claude-opus-4-7 deprecated the `temperature` parameter entirely — the
-        # API returns 400 if it is present, on any code path.
+        # claude-opus-4-7 已经完全弃用 temperature；
+        # 只要带上就会直接 400。
         omit_temperature = "opus-4-7" in model_name
 
         kwargs: dict[str, Any] = {
@@ -466,9 +455,8 @@ class AnthropicProvider(LLMProvider):
             kwargs["system"] = system
 
         if reasoning_effort == "adaptive":
-            # Adaptive thinking: model decides when and how much to think
-            # Supported on claude-sonnet-4-6 and claude-opus-4-6.
-            # Also auto-enables interleaved thinking between tool calls.
+            # Adaptive thinking：由模型自己决定是否思考、思考多少。
+            # 某些 Claude 新模型支持这种模式，并会自动在工具调用之间交错思考。
             kwargs["thinking"] = {"type": "adaptive"}
             if not omit_temperature:
                 kwargs["temperature"] = 1.0
@@ -494,7 +482,7 @@ class AnthropicProvider(LLMProvider):
         return kwargs
 
     # ------------------------------------------------------------------
-    # Response parsing
+    # 响应解析
     # ------------------------------------------------------------------
 
     @staticmethod
@@ -550,14 +538,12 @@ class AnthropicProvider(LLMProvider):
         )
 
     # ------------------------------------------------------------------
-    # Public API
+    # 对外公开 API
     # ------------------------------------------------------------------
 
     @staticmethod
     def _is_streaming_required_error(e: Exception) -> bool:
-        """Anthropic SDK rejects long non-stream requests with a ValueError
-        whose message starts with 'Streaming is required'. Match defensively
-        on substring so a future SDK message tweak doesn't break detection."""
+        """判断异常是否代表 Anthropic 要求本次调用必须改走流式模式。"""
         return isinstance(e, ValueError) and "streaming is required" in str(e).lower()
 
     async def chat(
@@ -579,11 +565,9 @@ class AnthropicProvider(LLMProvider):
             return self._parse_response(response)
         except Exception as e:
             if self._is_streaming_required_error(e):
-                # Anthropic SDK refuses non-stream calls when max_tokens (plus
-                # extended thinking budget) could push the request past the
-                # 10-minute server-side timeout (#2709). Transparently retry
-                # via the streaming path so callers don't need to know the
-                # provider-specific limit.
+                # 当 max_tokens 加上 thinking 预算后可能让请求超过服务端超时上限时，
+                # Anthropic SDK 会拒绝非流式调用。这里自动改走 streaming 重试，
+                # 上层就不需要感知这条厂商特定限制。
                 return await self.chat_stream(
                     messages=messages,
                     tools=tools,
@@ -616,10 +600,8 @@ class AnthropicProvider(LLMProvider):
         try:
             async with self._client.messages.stream(**kwargs) as stream:
                 if on_content_delta or on_thinking_delta or on_tool_call_delta:
-                    # Idle timeout must track *any* SSE chunk (thinking_delta,
-                    # tool JSON deltas, etc.), not only text_stream tokens.
-                    # Otherwise extended thinking can stall text_stream for minutes
-                    # while the connection is healthy (e.g. MiniMax Anthropic).
+                    # 空闲超时必须跟踪“任何 SSE 事件”，而不只是文本 token。
+                    # 否则模型长时间 thinking 时，明明连接还活着，也会被误判超时。
                     tool_blocks: dict[int, dict[str, str]] = {}
                     while True:
                         try:

@@ -1,4 +1,12 @@
-"""AWS Bedrock Converse provider."""
+"""AWS Bedrock Provider：通过 Bedrock Converse / ConverseStream 调用模型。
+
+这个 provider 的难点在于：
+- Bedrock 的消息格式和 OpenAI 风格不同
+- 不同模型能力差异较大
+- 图片、工具调用、reasoning 块都需要做格式映射
+
+所以这个文件本质上是“nanobot 标准消息格式”到“Bedrock Converse 格式”的转换层。
+"""
 
 from __future__ import annotations
 
@@ -26,6 +34,7 @@ _NOOP_TOOL_NAME = "nanobot_noop"
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """递归合并字典；``override`` 中的值优先级更高。"""
     merged = dict(base)
     for key, value in override.items():
         if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
@@ -36,6 +45,7 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 
 
 def _next_or_none(iterator: Iterator[dict[str, Any]]) -> dict[str, Any] | None:
+    """从迭代器取下一个元素；若已耗尽则返回 ``None``。"""
     try:
         return next(iterator)
     except StopIteration:
@@ -43,7 +53,7 @@ def _next_or_none(iterator: Iterator[dict[str, Any]]) -> dict[str, Any] | None:
 
 
 class BedrockProvider(LLMProvider):
-    """LLM provider using AWS Bedrock Runtime's Converse APIs."""
+    """基于 AWS Bedrock Runtime Converse API 的 LLM Provider。"""
 
     def __init__(
         self,
@@ -64,6 +74,7 @@ class BedrockProvider(LLMProvider):
         self._client = client if client is not None else self._make_client()
 
     def _make_client(self) -> Any:
+        """构造 boto3 Bedrock Runtime client。"""
         if self.api_key:
             os.environ["AWS_BEARER_TOKEN_BEDROCK"] = self.api_key
         try:
@@ -87,25 +98,30 @@ class BedrockProvider(LLMProvider):
 
     @staticmethod
     def _strip_prefix(model: str) -> str:
+        """去掉 ``bedrock/`` 模型名前缀，保留真实 Bedrock model id。"""
         if model.startswith("bedrock/"):
             return model[len("bedrock/"):]
         return model
 
     @staticmethod
     def _matches_model_token(model: str, tokens: tuple[str, ...]) -> bool:
+        """判断模型名中是否包含某组能力识别 token。"""
         model_lower = model.lower()
         return any(token in model_lower for token in tokens)
 
     @classmethod
     def _supports_temperature(cls, model: str) -> bool:
+        """判断指定模型是否支持 ``temperature``。"""
         return not cls._matches_model_token(model, _TEMPERATURE_UNSUPPORTED_MODEL_TOKENS)
 
     @classmethod
     def _uses_adaptive_thinking_only(cls, model: str) -> bool:
+        """判断模型是否只能使用 Bedrock 的 adaptive thinking 配置。"""
         return cls._matches_model_token(model, _ADAPTIVE_THINKING_ONLY_MODEL_TOKENS)
 
     @staticmethod
     def _image_url_block(block: dict[str, Any]) -> dict[str, Any] | None:
+        """把 OpenAI 风格 ``image_url`` 块转成 Bedrock 图片块。"""
         url = (block.get("image_url") or {}).get("url", "")
         if not isinstance(url, str) or not url:
             return None
@@ -123,6 +139,7 @@ class BedrockProvider(LLMProvider):
 
     @classmethod
     def _content_blocks(cls, content: Any, *, for_tool_result: bool = False) -> list[dict[str, Any]]:
+        """把通用 content 转成 Bedrock ``content`` block 列表。"""
         if isinstance(content, str) or content is None:
             return [{"text": content or "(empty)"}]
         if not isinstance(content, list):
@@ -148,7 +165,7 @@ class BedrockProvider(LLMProvider):
                     blocks.append(converted)
                 continue
 
-            # Preserve already-Bedrock-shaped content where possible.
+            # 如果内容本来就已经长得像 Bedrock block，就尽量原样保留。
             for key in ("text", "image", "document", "video", "json", "searchResult"):
                 if key in item:
                     blocks.append({key: item[key]})
@@ -160,6 +177,7 @@ class BedrockProvider(LLMProvider):
 
     @classmethod
     def _system_blocks(cls, content: Any) -> list[dict[str, Any]]:
+        """从通用 content 中筛出可放进 Bedrock system 字段的块。"""
         return [
             block for block in cls._content_blocks(content)
             if "text" in block or "cachePoint" in block or "guardContent" in block
@@ -167,6 +185,7 @@ class BedrockProvider(LLMProvider):
 
     @classmethod
     def _tool_result_block(cls, msg: dict[str, Any]) -> dict[str, Any]:
+        """把 tool 角色消息转换成 Bedrock 的 ``toolResult`` block。"""
         return {
             "toolResult": {
                 "toolUseId": str(msg.get("tool_call_id") or ""),
@@ -177,6 +196,7 @@ class BedrockProvider(LLMProvider):
 
     @staticmethod
     def _tool_use_block(tool_call: dict[str, Any]) -> dict[str, Any] | None:
+        """把 assistant 发起的工具调用转换成 Bedrock 的 ``toolUse`` block。"""
         function = tool_call.get("function")
         if not isinstance(function, dict):
             return None
@@ -191,6 +211,7 @@ class BedrockProvider(LLMProvider):
 
     @staticmethod
     def _reasoning_block(block: dict[str, Any]) -> dict[str, Any] | None:
+        """把通用 reasoning / thinking 块映射成 Bedrock reasoningContent。"""
         if block.get("type") not in {"thinking", "reasoning", "redacted_thinking"}:
             return None
         text = block.get("thinking") or block.get("text")
@@ -213,6 +234,7 @@ class BedrockProvider(LLMProvider):
 
     @classmethod
     def _assistant_blocks(cls, msg: dict[str, Any]) -> list[dict[str, Any]]:
+        """把 assistant 消息转换成 Bedrock assistant content blocks。"""
         blocks: list[dict[str, Any]] = []
 
         for thinking in msg.get("thinking_blocks") or []:
@@ -237,6 +259,7 @@ class BedrockProvider(LLMProvider):
 
     @staticmethod
     def _has_tool_use(msg: dict[str, Any]) -> bool:
+        """判断一条 Bedrock 风格 assistant 消息里是否包含 ``toolUse``。"""
         content = msg.get("content")
         return isinstance(content, list) and any(
             isinstance(block, dict) and "toolUse" in block for block in content
@@ -244,6 +267,7 @@ class BedrockProvider(LLMProvider):
 
     @staticmethod
     def _merge_consecutive(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """合并连续同角色消息，适配 Bedrock 对 message 序列的偏好。"""
         merged: list[dict[str, Any]] = []
         for msg in messages:
             if merged and merged[-1].get("role") == msg.get("role"):

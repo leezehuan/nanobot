@@ -1,4 +1,12 @@
-"""WeCom (Enterprise WeChat) channel implementation using wecom_aibot_sdk."""
+"""企业微信（WeCom）渠道实现：使用 ``wecom_aibot_sdk`` 接入 AI Bot。
+
+这个文件展示了另一种常见的渠道接入方式：
+- 不是直接 HTTP webhook
+- 也不是自己手写协议
+- 而是依赖第三方 SDK 提供的 WebSocket 长连接和事件回调
+
+本文件的核心职责是把企业微信 SDK 的事件回调，转换成 nanobot 统一的消息流。
+"""
 
 import asyncio
 import base64
@@ -20,15 +28,15 @@ from nanobot.config.schema import Base
 
 WECOM_AVAILABLE = importlib.util.find_spec("wecom_aibot_sdk") is not None
 
-# Upload safety limits (matching QQ channel defaults)
+# 上传安全大小限制，和 QQ 渠道保持相近默认值。
 WECOM_UPLOAD_MAX_BYTES = 1024 * 1024 * 200  # 200MB
 
-# Replace unsafe characters with "_", keep Chinese and common safe punctuation.
+# 用于清洗文件名：把危险字符替换成 "_"，同时保留中文和常见安全标点。
 _SAFE_NAME_RE = re.compile(r"[^\w.\-()\[\]（）【】\u4e00-\u9fff]+", re.UNICODE)
 
 
 def _sanitize_filename(name: str) -> str:
-    """Sanitize filename to avoid traversal and problematic chars."""
+    """清洗文件名，避免路径穿越和奇怪字符导致落盘失败。"""
     name = (name or "").strip()
     name = Path(name).name
     name = _SAFE_NAME_RE.sub("_", name).strip("._ ")
@@ -41,7 +49,7 @@ _AUDIO_EXTS = {".amr", ".mp3", ".wav", ".ogg"}
 
 
 def _guess_wecom_media_type(filename: str) -> str:
-    """Classify file extension as WeCom media_type string."""
+    """根据扩展名推断企业微信发送时要使用的媒体类型。"""
     ext = Path(filename).suffix.lower()
     if ext in _IMAGE_EXTS:
         return "image"
@@ -52,7 +60,7 @@ def _guess_wecom_media_type(filename: str) -> str:
     return "file"
 
 class WecomConfig(Base):
-    """WeCom (Enterprise WeChat) AI Bot channel configuration."""
+    """企业微信 AI Bot 渠道配置模型。"""
 
     enabled: bool = False
     bot_id: str = ""
@@ -61,7 +69,7 @@ class WecomConfig(Base):
     welcome_message: str = ""
 
 
-# Message type display mapping
+# 当 mixed 消息里出现我们不做深度解析的子类型时，用这些占位文本保持可读性。
 MSG_TYPE_MAP = {
     "image": "[image]",
     "voice": "[voice]",
@@ -71,13 +79,14 @@ MSG_TYPE_MAP = {
 
 
 class WecomChannel(BaseChannel):
-    """
-    WeCom (Enterprise WeChat) channel using WebSocket long connection.
+    """基于企业微信 WebSocket 长连接的渠道适配器。
 
-    Uses WebSocket to receive events - no public IP or webhook required.
+    【中文名称】企业微信渠道适配器
 
-    Requires:
-    - Bot ID and Secret from WeCom AI Bot platform
+    【特点】
+    - 不需要公网 webhook
+    - 可接收文本、图片、语音、文件、mixed 混合消息
+    - 支持基于原始 frame 的 reply / reply_stream 语义
     """
 
     name = "wecom"
@@ -96,11 +105,11 @@ class WecomChannel(BaseChannel):
         self._processed_message_ids: OrderedDict[str, None] = OrderedDict()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._generate_req_id = None
-        # Store frame headers for each chat to enable replies
+        # 保存每个 chat 最近一次的原始 frame，后续回复消息时需要它维持企业微信上下文。
         self._chat_frames: dict[str, Any] = {}
 
     async def start(self) -> None:
-        """Start the WeCom bot with WebSocket long connection."""
+        """启动企业微信机器人并注册所有事件回调。"""
         if not WECOM_AVAILABLE:
             self.logger.error("SDK not installed. Run: pip install nanobot-ai[wecom]")
             return
@@ -115,7 +124,7 @@ class WecomChannel(BaseChannel):
         self._loop = asyncio.get_running_loop()
         self._generate_req_id = generate_req_id
 
-        # Create WebSocket client
+        # 创建 SDK WebSocket client；自动重连与心跳主要由 SDK 内部维护。
         self._client = WSClient({
             "bot_id": self.config.bot_id,
             "secret": self.config.secret,
@@ -124,7 +133,7 @@ class WecomChannel(BaseChannel):
             "heartbeat_interval": 30000,
         })
 
-        # Register event handlers
+        # 把不同类型的企业微信事件分别绑定到对应处理函数。
         self._client.on("connected", self._on_connected)
         self._client.on("authenticated", self._on_authenticated)
         self._client.on("disconnected", self._on_disconnected)
@@ -139,61 +148,64 @@ class WecomChannel(BaseChannel):
         self.logger.info("bot starting with WebSocket long connection")
         self.logger.info("No public IP required - using WebSocket to receive events")
 
-        # Connect
+        # 真正建立 WebSocket 长连接。
         await self._client.connect_async()
 
-        # Keep running until stopped
+        # 渠道对象保持存活，直到外部调用 stop()。
         while self._running:
             await asyncio.sleep(1)
 
     async def stop(self) -> None:
-        """Stop the WeCom bot."""
+        """停止企业微信机器人并断开连接。"""
         self._running = False
         if self._client:
             await self._client.disconnect()
         self.logger.info("bot stopped")
 
     async def _on_connected(self, frame: Any) -> None:
-        """Handle WebSocket connected event."""
+        """处理 WebSocket 已连接事件。"""
         self.logger.info("WebSocket connected")
 
     async def _on_authenticated(self, frame: Any) -> None:
-        """Handle authentication success event."""
+        """处理鉴权成功事件。"""
         self.logger.info("authenticated successfully")
 
     async def _on_disconnected(self, frame: Any) -> None:
-        """Handle WebSocket disconnected event."""
+        """处理连接断开事件。"""
         reason = frame.body if hasattr(frame, 'body') else str(frame)
         self.logger.warning("WebSocket disconnected: {}", reason)
 
     async def _on_error(self, frame: Any) -> None:
-        """Handle error event."""
+        """处理 SDK 层错误事件。"""
         self.logger.error("error: {}", frame)
 
     async def _on_text_message(self, frame: Any) -> None:
-        """Handle text message."""
+        """处理文本消息事件。"""
         await self._process_message(frame, "text")
 
     async def _on_image_message(self, frame: Any) -> None:
-        """Handle image message."""
+        """处理图片消息事件。"""
         await self._process_message(frame, "image")
 
     async def _on_voice_message(self, frame: Any) -> None:
-        """Handle voice message."""
+        """处理语音消息事件。"""
         await self._process_message(frame, "voice")
 
     async def _on_file_message(self, frame: Any) -> None:
-        """Handle file message."""
+        """处理文件消息事件。"""
         await self._process_message(frame, "file")
 
     async def _on_mixed_message(self, frame: Any) -> None:
-        """Handle mixed content message."""
+        """处理 mixed 混合消息事件。"""
         await self._process_message(frame, "mixed")
 
     async def _on_enter_chat(self, frame: Any) -> None:
-        """Handle enter_chat event (user opens chat with bot)."""
+        """处理用户打开机器人会话窗口事件。
+
+        企业微信支持“进入会话”这一事件，这里可用于发送欢迎语。
+        """
         try:
-            # Extract body from WsFrame dataclass or dict
+            # SDK 不同版本里 frame 可能是对象也可能是 dict，这里统一兼容读取 body。
             if hasattr(frame, 'body'):
                 body = frame.body or {}
             elif isinstance(frame, dict):
@@ -215,9 +227,17 @@ class WecomChannel(BaseChannel):
             self.logger.exception("Error handling enter_chat")
 
     async def _process_message(self, frame: Any, msg_type: str) -> None:
-        """Process incoming message and forward to bus."""
+        """解析企业微信入站消息，并转发到统一消息总线。
+
+        这是本文件最重要的入站转换函数。它负责：
+        1. 从 SDK frame 中提取 body
+        2. 做权限判断和消息去重
+        3. 按消息类型抽取文本与媒体
+        4. 需要时下载企业微信加密附件
+        5. 调用 ``_handle_message()`` 进入 nanobot 标准处理链
+        """
         try:
-            # Extract body from WsFrame dataclass or dict
+            # 兼容 SDK 不同 frame 形态。
             if hasattr(frame, 'body'):
                 body = frame.body or {}
             elif isinstance(frame, dict):
@@ -225,33 +245,32 @@ class WecomChannel(BaseChannel):
             else:
                 body = {}
 
-            # Ensure body is a dict
+            # 后续逻辑默认 body 是 dict，这里先防御性检查。
             if not isinstance(body, dict):
                 self.logger.warning("Invalid body type: {}", type(body))
                 return
 
-            # Extract message info
+            # 若平台没有给标准 msgid，就退化成 chatid + sendertime 组合键。
             msg_id = body.get("msgid", "")
             if not msg_id:
                 msg_id = f"{body.get('chatid', '')}_{body.get('sendertime', '')}"
 
-            # Extract sender info from "from" field (SDK format)
+            # 企业微信 SDK 会把发送者身份放在 from 字段里。
             from_info = body.get("from", {})
             sender_id = from_info.get("userid", "unknown") if isinstance(from_info, dict) else "unknown"
             if not self.is_allowed(sender_id):
                 return
 
-            # Deduplication check
+            # 通过一个小缓存做去重，避免平台重试导致同一条消息反复触发。
             if msg_id in self._processed_message_ids:
                 return
             self._processed_message_ids[msg_id] = None
 
-            # Trim cache
+            # 控制缓存上限，避免常驻进程无限增长。
             while len(self._processed_message_ids) > 1000:
                 self._processed_message_ids.popitem(last=False)
 
-            # For single chat, chatid is the sender's userid
-            # For group chat, chatid is provided in body
+            # 单聊里 chatid 往往就是发送者 userid；群聊则通常由 body 显式提供。
             chat_type = body.get("chattype", "single")
             chat_id = body.get("chatid", sender_id)
 
@@ -281,7 +300,7 @@ class WecomChannel(BaseChannel):
 
             elif msg_type == "voice":
                 voice_info = body.get("voice", {})
-                # Voice message already contains transcribed content from WeCom
+                # 企业微信语音消息通常已经带有平台侧转写文本。
                 voice_content = voice_info.get("content", "")
                 if voice_content:
                     content_parts.append(f"[voice] {voice_content}")
@@ -306,7 +325,7 @@ class WecomChannel(BaseChannel):
                     content_parts.append(f"[file: {file_name or 'unknown'}: download failed]")
 
             elif msg_type == "mixed":
-                # Mixed content contains multiple message items
+                # mixed 消息本质上是多个子消息片段的容器。
                 msg_items = body.get("mixed", {}).get("msg_item", [])
                 for item in msg_items:
                     item_type = item.get("msgtype", "")
@@ -334,10 +353,10 @@ class WecomChannel(BaseChannel):
             if not content:
                 return
 
-            # Store frame for this chat to enable replies
+            # 保存最近原始 frame，后续 reply / reply_stream 发送时需要它。
             self._chat_frames[chat_id] = frame
 
-            # Forward to message bus
+            # 统一投递到 nanobot 的消息总线。
             await self._handle_message(
                 sender_id=sender_id,
                 chat_id=chat_id,
@@ -360,11 +379,10 @@ class WecomChannel(BaseChannel):
         media_type: str,
         filename: str | None = None,
     ) -> str | None:
-        """
-        Download and decrypt media from WeCom.
+        """下载并保存企业微信媒体文件。
 
-        Returns:
-            file_path or None if download failed
+        企业微信媒体不是普通公开 URL，通常需要结合 ``aes_key`` 解密。
+        SDK 已封装了下载与解密，本函数负责把结果落到本地媒体目录。
         """
         try:
             data, fname = await self._client.download_file(file_url, aes_key)
@@ -398,16 +416,12 @@ class WecomChannel(BaseChannel):
     async def _upload_media_ws(
         self, client: Any, file_path: str,
     ) -> "tuple[str, str] | tuple[None, None]":
-        """Upload a local file to WeCom via WebSocket 3-step protocol (base64).
+        """通过企业微信 WebSocket 三段式协议上传本地媒体。
 
-        Uses the WeCom WebSocket upload commands directly via
-        ``client._ws_manager.send_reply()``:
-
-          ``aibot_upload_media_init``   → upload_id
-          ``aibot_upload_media_chunk`` × N  (≤512 KB raw per chunk, base64)
-          ``aibot_upload_media_finish`` → media_id
-
-        Returns (media_id, media_type) on success, (None, None) on failure.
+        上传流程：
+        1. ``aibot_upload_media_init``：申请 ``upload_id``
+        2. ``aibot_upload_media_chunk``：按块上传内容
+        3. ``aibot_upload_media_finish``：结束上传并换回 ``media_id``
         """
         from wecom_aibot_sdk.utils import generate_req_id as _gen_req_id
 
@@ -415,7 +429,7 @@ class WecomChannel(BaseChannel):
             fname = os.path.basename(file_path)
             media_type = _guess_wecom_media_type(fname)
 
-            # Read file size and data in a thread to avoid blocking the event loop
+            # 读文件属于阻塞 I/O，放到线程里执行，避免卡住 asyncio 事件循环。
             def _read_file():
                 file_size = os.path.getsize(file_path)
                 if file_size > WECOM_UPLOAD_MAX_BYTES:
@@ -426,7 +440,7 @@ class WecomChannel(BaseChannel):
                     return file_size, f.read()
 
             file_size, data = await asyncio.to_thread(_read_file)
-            # MD5 is used for file integrity only, not cryptographic security
+            # 这里的 MD5 只是协议要求的完整性校验，并非安全场景哈希。
             md5_hash = hashlib.md5(data).hexdigest()
 
             chunk_size = 512 * 1024  # 512 KB raw (before base64)
@@ -435,7 +449,7 @@ class WecomChannel(BaseChannel):
             n_chunks = len(chunk_list)
             del mv, data
 
-            # Step 1: init
+            # 第 1 步：初始化上传，换回 upload_id。
             req_id = _gen_req_id("upload_init")
             resp = await client._ws_manager.send_reply(req_id, {
                 "type": media_type,
@@ -452,7 +466,7 @@ class WecomChannel(BaseChannel):
                 self.logger.warning("upload init: no upload_id in response")
                 return None, None
 
-            # Step 2: send chunks
+            # 第 2 步：按顺序发送所有分片。
             for i, chunk in enumerate(chunk_list):
                 req_id = _gen_req_id("upload_chunk")
                 resp = await client._ws_manager.send_reply(req_id, {
@@ -464,7 +478,7 @@ class WecomChannel(BaseChannel):
                     self.logger.warning("upload chunk {} failed ({}): {}", i, resp.errcode, resp.errmsg)
                     return None, None
 
-            # Step 3: finish
+            # 第 3 步：提交完成，换回最终 media_id。
             req_id = _gen_req_id("upload_finish")
             resp = await client._ws_manager.send_reply(req_id, {
                 "upload_id": upload_id,
@@ -490,7 +504,13 @@ class WecomChannel(BaseChannel):
             return None, None
 
     async def send(self, msg: OutboundMessage) -> None:
-        """Send a message through WeCom."""
+        """向企业微信发送文本和媒体。
+
+        企业微信有两种常见发送语境：
+        - 有原始 frame：表示在回复某条已有消息
+        - 没有原始 frame：表示主动推送
+        两者使用的 SDK 接口略有区别。
+        """
         if not self._client:
             self.logger.warning("client not initialized")
             return
@@ -499,10 +519,10 @@ class WecomChannel(BaseChannel):
             content = (msg.content or "").strip()
             is_progress = bool(msg.metadata.get("_progress"))
 
-            # Get the stored frame for this chat
+            # 拿到该 chat 最近一次原始 frame，reply_stream 发送会依赖它。
             frame = self._chat_frames.get(msg.chat_id)
 
-            # Send media files via WebSocket upload
+            # 媒体文件需要先上传为 media_id，随后再引用 media_id 发送。
             for file_path in msg.media or []:
                 if not os.path.isfile(file_path):
                     self.logger.warning("media file not found: {}", file_path)
@@ -527,9 +547,8 @@ class WecomChannel(BaseChannel):
                 return
 
             if frame:
-                # Both progress and final messages must use reply_stream (cmd="aibot_respond_msg").
-                # The plain reply() uses cmd="reply" which does not support "text" msgtype
-                # and causes errcode=40008 from WeCom API.
+                # 不论进度消息还是最终消息，都统一用 reply_stream。
+                # 普通 reply() 在发送 text 时会触发企业微信侧错误。
                 stream_id = self._generate_req_id("stream")
                 await self._client.reply_stream(
                     frame,
@@ -543,7 +562,7 @@ class WecomChannel(BaseChannel):
                     msg.chat_id,
                 )
             else:
-                # No frame (e.g. cron push): proactive send only supports markdown
+                # 没有 frame 时，多半是主动推送，例如 cron 消息，只能走主动发送接口。
                 await self._client.send_message(msg.chat_id, {
                     "msgtype": "markdown",
                     "markdown": {"content": content},

@@ -162,7 +162,7 @@ def get_image_gen_provider(name: str) -> type[ImageGenerationProvider] | None:
 
 
 def image_gen_provider_names() -> tuple[str, ...]:
-    """Return registered image generation provider names in registry order."""
+    """按注册顺序返回所有图片生成 provider 的名称。"""
     return tuple(_IMAGE_GEN_PROVIDERS)
 
 
@@ -895,9 +895,9 @@ class MiniMaxImageGenerationClient(ImageGenerationProvider):
 
 
 def _minimax_images_from_payload(payload: dict[str, Any]) -> list[str]:
-    """Extract base64 images from MiniMax API response.
+    """从 MiniMax API 响应中提取 base64 图片。
 
-    MiniMax returns images in ``data.image_base64`` (list of base64 strings).
+    MiniMax 会把图片放在 ``data.image_base64`` 里，形式是 base64 字符串列表。
     """
     images: list[str] = []
     data = payload.get("data")

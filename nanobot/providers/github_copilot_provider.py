@@ -1,4 +1,12 @@
-"""GitHub Copilot OAuth-backed provider."""
+"""GitHub Copilot Provider：通过 GitHub OAuth 换取 Copilot 访问令牌。
+
+和常见“直接填 API Key”型 provider 不同，这个文件走的是 GitHub 设备码登录流程：
+
+1. 用户先登录 GitHub
+2. 本地保存 GitHub OAuth token
+3. 运行时再用 GitHub token 换取 Copilot 短期访问 token
+4. 最终仍然复用 OpenAI 兼容 provider 的请求逻辑
+"""
 
 from __future__ import annotations
 
@@ -30,6 +38,7 @@ _LONG_LIVED_TOKEN_SECONDS = 315360000
 
 
 def get_storage() -> FileTokenStorage:
+    """返回保存 GitHub OAuth token 的本地存储对象。"""
     return FileTokenStorage(
         token_filename=TOKEN_FILENAME,
         app_name=TOKEN_APP_NAME,
@@ -38,6 +47,7 @@ def get_storage() -> FileTokenStorage:
 
 
 def _copilot_headers(token: str) -> dict[str, str]:
+    """构造访问 GitHub/Copilot 相关接口时的标准请求头。"""
     return {
         "Authorization": f"token {token}",
         "Accept": "application/json",
@@ -48,6 +58,7 @@ def _copilot_headers(token: str) -> dict[str, str]:
 
 
 def _load_github_token() -> OAuthToken | None:
+    """从本地存储读取 GitHub OAuth token。"""
     token = get_storage().load()
     if not token or not token.access:
         return None
@@ -55,7 +66,7 @@ def _load_github_token() -> OAuthToken | None:
 
 
 def get_github_copilot_login_status() -> OAuthToken | None:
-    """Return the persisted GitHub OAuth token if available."""
+    """查看本地是否已经保存了 GitHub 登录令牌。"""
     return _load_github_token()
 
 
@@ -63,7 +74,13 @@ def login_github_copilot(
     print_fn: Callable[[str], None] | None = None,
     prompt_fn: Callable[[str], str] | None = None,
 ) -> OAuthToken:
-    """Run GitHub device flow and persist the GitHub OAuth token used for Copilot."""
+    """执行 GitHub Device Flow，并持久化 Copilot 后续要用的 GitHub token。
+
+    这是一个典型的“设备码登录”流程：
+    - 当前进程向 GitHub 申请 ``device_code`` / ``user_code``
+    - 用户在浏览器里完成授权
+    - 当前进程轮询 GitHub，直到 access token 就绪
+    """
     del prompt_fn
     printer = print_fn or print
     timeout = httpx.Timeout(20.0, connect=20.0)
@@ -87,6 +104,7 @@ def login_github_copilot(
         printer(f"Open: {verify_url}")
         printer(f"Code: {user_code}")
         if verify_complete:
+            # 能自动打开浏览器最好；失败也不影响用户手动复制链接授权。
             with suppress(Exception):
                 webbrowser.open(verify_complete)
 
@@ -113,6 +131,7 @@ def login_github_copilot(
                 break
 
             error = poll_payload.get("error")
+            # 轮询状态机：根据 GitHub 返回的 error 类型决定继续等待、放慢轮询或直接失败。
             if error == "authorization_pending":
                 time.sleep(current_interval)
                 continue
@@ -155,7 +174,12 @@ def login_github_copilot(
 
 
 class GitHubCopilotProvider(OpenAICompatProvider):
-    """Provider that exchanges a stored GitHub OAuth token for Copilot access tokens."""
+    """先用 GitHub OAuth token 换 Copilot token，再复用 OpenAICompatProvider 的 Provider。
+
+    继承 ``OpenAICompatProvider`` 说明：
+    在 nanobot 看来，Copilot 的“消息格式、流式行为、工具调用协议”整体仍然近似
+    OpenAI 兼容接口，只是鉴权环节更复杂。
+    """
 
     def __init__(self, default_model: str = "github-copilot/gpt-4.1"):
         from nanobot.providers.registry import find_by_name
@@ -175,10 +199,12 @@ class GitHubCopilotProvider(OpenAICompatProvider):
         )
 
     async def _get_copilot_access_token(self) -> str:
+        """获取可用的 Copilot 访问 token，并做本地缓存。"""
         now = time.time()
         if self._copilot_access_token and now < self._copilot_expires_at - _EXPIRY_SKEW_SECONDS:
             return self._copilot_access_token
 
+        # 第一步：确认用户已经登录 GitHub。
         github_token = _load_github_token()
         if not github_token or not github_token.access:
             raise RuntimeError("GitHub Copilot is not logged in. Run: nanobot provider login github-copilot")
@@ -192,6 +218,7 @@ class GitHubCopilotProvider(OpenAICompatProvider):
             response.raise_for_status()
             payload = response.json()
 
+        # 第二步：拿 GitHub token 去 Copilot 内部接口换真正可调用模型的 token。
         token = payload.get("token")
         if not token:
             raise RuntimeError("GitHub Copilot token exchange returned no token.")
@@ -206,6 +233,7 @@ class GitHubCopilotProvider(OpenAICompatProvider):
         return self._copilot_access_token
 
     async def _refresh_client_api_key(self) -> str:
+        """刷新底层 OpenAI 兼容 client 所使用的 api_key。"""
         token = await self._get_copilot_access_token()
         client = await self._ensure_client()
         self.api_key = token
@@ -222,6 +250,7 @@ class GitHubCopilotProvider(OpenAICompatProvider):
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, object] | None = None,
     ):
+        """非流式对话：先刷新 Copilot token，再复用父类实现。"""
         await self._refresh_client_api_key()
         return await super().chat(
             messages=messages,
@@ -246,6 +275,7 @@ class GitHubCopilotProvider(OpenAICompatProvider):
         on_thinking_delta: Callable[[str], Awaitable[None]] | None = None,
         on_tool_call_delta: Callable[[dict[str, object]], Awaitable[None]] | None = None,
     ):
+        """流式对话：先刷新 Copilot token，再复用父类实现。"""
         await self._refresh_client_api_key()
         return await super().chat_stream(
             messages=messages,

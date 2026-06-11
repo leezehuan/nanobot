@@ -25,7 +25,7 @@ class ProviderSpec:
     Factory、Config 自动匹配等逻辑都会参考这里。
     """
 
-    # identity
+    # 基础身份信息
     name: str  # 配置字段名，例如 "dashscope"
     keywords: tuple[str, ...]  # 模型名关键词，用于自动匹配
     env_key: str  # API key 对应环境变量名
@@ -83,7 +83,7 @@ class ProviderSpec:
 # ---------------------------------------------------------------------------
 
 PROVIDERS: tuple[ProviderSpec, ...] = (
-    # === Custom (direct OpenAI-compatible endpoint) ========================
+    # === Custom：用户手填的直连 OpenAI-compatible 端点 ======================
     ProviderSpec(
         name="custom",
         keywords=(),
@@ -93,7 +93,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         is_direct=True,
     ),
 
-    # === Azure OpenAI (direct API calls with API version 2024-10-21) =====
+    # === Azure OpenAI：直连 Azure OpenAI API ===============================
     ProviderSpec(
         name="azure_openai",
         keywords=("azure", "azure-openai"),
@@ -102,7 +102,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         backend="azure_openai",
         is_direct=True,
     ),
-    # === AWS Bedrock (native Converse API via bedrock-runtime) =============
+    # === AWS Bedrock：通过原生 Converse API 接入 ============================
     ProviderSpec(
         name="bedrock",
         keywords=(
@@ -125,9 +125,9 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         backend="bedrock",
         is_direct=True,
     ),
-    # === Gateways (detected by api_key / api_base, not model name) =========
-    # Gateways can route any model, so they win in fallback.
-    # OpenRouter: global gateway, keys start with "sk-or-"
+    # === 网关型 Provider：主要通过 api_key / api_base 识别，而不是模型名 =====
+    # 网关通常可以转发任意模型，因此 fallback 阶段优先级更高。
+    # OpenRouter：全局模型网关，key 通常以 ``sk-or-`` 开头。
     ProviderSpec(
         name="openrouter",
         keywords=("openrouter",),
@@ -141,7 +141,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         supports_prompt_caching=True,
         gateway_reasoning_style="reasoning_effort",
     ),
-    # Hugging Face Inference Providers: OpenAI-compatible router for chat models.
+    # Hugging Face Inference Providers：聊天模型的 OpenAI-compatible 路由层。
     ProviderSpec(
         name="huggingface",
         keywords=("huggingface", "hugging-face"),
@@ -153,7 +153,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         detect_by_base_keyword="huggingface",
         default_api_base="https://router.huggingface.co/v1",
     ),
-    # Skywork API platform (APIFree): OpenAI-compatible MaaS gateway.
+    # Skywork / APIFree：OpenAI-compatible 的 MaaS 网关。
     ProviderSpec(
         name="skywork",
         keywords=("skywork", "skyclaw", "apifree"),
@@ -165,9 +165,9 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         detect_by_base_keyword="apifree.ai",
         default_api_base="https://api.apifree.ai/agent/v1",
     ),
-    # AiHubMix: global gateway, OpenAI-compatible interface.
-    # strip_model_prefix=True: doesn't understand "anthropic/claude-3",
-    # strips to bare "claude-3".
+    # AiHubMix：全局网关，接口兼容 OpenAI。
+    # ``strip_model_prefix=True`` 表示它不理解 ``anthropic/claude-3`` 这种前缀模型名，
+    # 发送前要裁成裸模型名 ``claude-3``。
     ProviderSpec(
         name="aihubmix",
         keywords=("aihubmix",),
@@ -179,7 +179,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         default_api_base="https://aihubmix.com/v1",
         strip_model_prefix=True,
     ),
-    # SiliconFlow (硅基流动): OpenAI-compatible gateway, model names keep org prefix
+    # SiliconFlow（硅基流动）：OpenAI-compatible 网关，模型名保留组织前缀。
     ProviderSpec(
         name="siliconflow",
         keywords=("siliconflow",),
@@ -191,7 +191,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         default_api_base="https://api.siliconflow.cn/v1",
     ),
 
-    # Novita AI: OpenAI-compatible gateway for hosted model APIs.
+    # Novita AI：托管模型 API 的 OpenAI-compatible 网关。
     ProviderSpec(
         name="novita",
         keywords=("novita",),
@@ -203,7 +203,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         default_api_base="https://api.novita.ai/openai",
     ),
 
-    # VolcEngine (火山引擎): OpenAI-compatible gateway, pay-per-use models
+    # VolcEngine（火山引擎）：OpenAI-compatible 网关，按量计费模型。
     ProviderSpec(
         name="volcengine",
         keywords=("volcengine", "volces", "ark"),
@@ -217,7 +217,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         supports_max_completion_tokens=True,
     ),
 
-    # VolcEngine Coding Plan (火山引擎 Coding Plan): same key as volcengine
+    # VolcEngine Coding Plan（火山引擎 Coding Plan）：与 volcengine 共用同一套 key。
     ProviderSpec(
         name="volcengine_coding_plan",
         keywords=("volcengine-plan",),
@@ -231,7 +231,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         supports_max_completion_tokens=True,
     ),
 
-    # BytePlus: VolcEngine international, pay-per-use models
+    # BytePlus：火山引擎国际版，按量计费模型。
     ProviderSpec(
         name="byteplus",
         keywords=("byteplus",),
@@ -245,7 +245,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         thinking_style="thinking_type",
     ),
 
-    # BytePlus Coding Plan: same key as byteplus
+    # BytePlus Coding Plan：与 byteplus 共用同一套 key。
     ProviderSpec(
         name="byteplus_coding_plan",
         keywords=("byteplus-plan",),
@@ -259,8 +259,8 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
     ),
 
 
-    # === Standard providers (matched by model-name keywords) ===============
-    # Anthropic: native Anthropic SDK
+    # === 标准 Provider：主要靠模型名关键词匹配 ===============================
+    # Anthropic：走原生 Anthropic SDK
     ProviderSpec(
         name="anthropic",
         keywords=("anthropic", "claude"),
@@ -269,7 +269,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         backend="anthropic",
         supports_prompt_caching=True,
     ),
-    # OpenAI: SDK default base URL (no override needed)
+    # OpenAI：使用 SDK 默认 base URL，无需额外覆盖
     ProviderSpec(
         name="openai",
         keywords=("openai", "gpt"),
@@ -278,7 +278,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         backend="openai_compat",
         supports_max_completion_tokens=True,
     ),
-    # OpenAI Codex: OAuth-based, dedicated provider
+    # OpenAI Codex：基于 OAuth 的专用 Provider
     ProviderSpec(
         name="openai_codex",
         keywords=("openai-codex",),
@@ -289,7 +289,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         default_api_base="https://chatgpt.com/backend-api",
         is_oauth=True,
     ),
-    # GitHub Copilot: OAuth-based
+    # GitHub Copilot：基于 OAuth
     ProviderSpec(
         name="github_copilot",
         keywords=("github_copilot", "copilot"),
@@ -301,7 +301,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         is_oauth=True,
         supports_max_completion_tokens=True,
     ),
-    # DeepSeek: OpenAI-compatible at api.deepseek.com
+    # DeepSeek：``api.deepseek.com`` 上的 OpenAI-compatible 接口
     ProviderSpec(
         name="deepseek",
         keywords=("deepseek",),
@@ -311,7 +311,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         default_api_base="https://api.deepseek.com",
         thinking_style="thinking_type",
     ),
-    # Gemini: Google's OpenAI-compatible endpoint
+    # Gemini：Google 提供的 OpenAI-compatible 入口
     ProviderSpec(
         name="gemini",
         keywords=("gemini", "gemma"),
@@ -320,7 +320,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         backend="openai_compat",
         default_api_base="https://generativelanguage.googleapis.com/v1beta/openai/",
     ),
-    # Zhipu (智谱): OpenAI-compatible at open.bigmodel.cn
+    # Zhipu（智谱）：``open.bigmodel.cn`` 上的 OpenAI-compatible 接口
     ProviderSpec(
         name="zhipu",
         keywords=("zhipu", "glm", "zai"),
@@ -330,7 +330,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         env_extras=(("ZHIPUAI_API_KEY", "{api_key}"),),
         default_api_base="https://open.bigmodel.cn/api/paas/v4",
     ),
-    # DashScope (通义): Qwen models, OpenAI-compatible endpoint
+    # DashScope（通义）：Qwen 模型的 OpenAI-compatible 接口
     ProviderSpec(
         name="dashscope",
         keywords=("qwen", "dashscope"),
@@ -340,7 +340,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         default_api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
         thinking_style="enable_thinking",
     ),
-    # Moonshot (月之暗面): Kimi K2.5 / K2.6 enforce temperature >= 1.0.
+    # Moonshot（月之暗面）：Kimi K2.5 / K2.6 强制要求 temperature >= 1.0
     ProviderSpec(
         name="moonshot",
         keywords=("moonshot", "kimi"),
@@ -353,7 +353,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
             ("kimi-k2.6", {"temperature": 1.0}),
         ),
     ),
-    # MiniMax: OpenAI-compatible API
+    # MiniMax：OpenAI-compatible API
     ProviderSpec(
         name="minimax",
         keywords=("minimax",),
@@ -363,7 +363,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         default_api_base="https://api.minimax.io/v1",
         thinking_style="reasoning_split",
     ),
-    # MiniMax Anthropic-compatible endpoint: supports thinking mode
+    # MiniMax Anthropic-compatible 端点：支持 thinking 模式
     ProviderSpec(
         name="minimax_anthropic",
         keywords=("minimax_anthropic",),
@@ -372,7 +372,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         backend="anthropic",
         default_api_base="https://api.minimax.io/anthropic",
     ),
-    # Mistral AI: OpenAI-compatible API
+    # Mistral AI：OpenAI-compatible API
     ProviderSpec(
         name="mistral",
         keywords=("mistral",),
@@ -381,7 +381,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         backend="openai_compat",
         default_api_base="https://api.mistral.ai/v1",
     ),
-    # Step Fun (阶跃星辰): OpenAI-compatible API
+    # Step Fun（阶跃星辰）：OpenAI-compatible API
     ProviderSpec(
         name="stepfun",
         keywords=("stepfun", "step"),
@@ -391,9 +391,10 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         default_api_base="https://api.stepfun.com/v1",
         reasoning_as_content=True,
     ),
-    # Xiaomi MIMO (小米): OpenAI-compatible API
-    # Hosted API (api.xiaomimimo.com) accepts {"thinking": {"type": "enabled"|"disabled"}}
-    # to toggle reasoning, matching the existing thinking_type style.
+    # Xiaomi MIMO（小米）：OpenAI-compatible API
+    # 托管接口 ``api.xiaomimimo.com`` 接受
+    # ``{"thinking": {"type": "enabled"|"disabled"}}`` 来切换 reasoning，
+    # 与现有的 ``thinking_type`` 风格保持一致。
     ProviderSpec(
         name="xiaomi_mimo",
         keywords=("xiaomi_mimo", "mimo"),
@@ -403,7 +404,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         default_api_base="https://api.xiaomimimo.com/v1",
         thinking_style="thinking_type",
     ),
-    # LongCat: OpenAI-compatible API
+    # LongCat：OpenAI-compatible API
     ProviderSpec(
         name="longcat",
         keywords=("longcat",),
@@ -412,7 +413,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         backend="openai_compat",
         default_api_base="https://api.longcat.chat/openai/v1",
     ),
-    # Ant Ling: OpenAI-compatible API for Ling/Ring model families.
+    # Ant Ling：面向 Ling / Ring 模型族的 OpenAI-compatible API
     ProviderSpec(
         name="ant_ling",
         keywords=("ant_ling", "ant-ling", "ling-", "ring-"),
@@ -422,8 +423,8 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         detect_by_base_keyword="ant-ling.com",
         default_api_base="https://api.ant-ling.com/v1",
     ),
-    # === Local deployment (matched by config key, NOT by api_base) =========
-    # vLLM / any OpenAI-compatible local server
+    # === 本地部署 Provider：按配置字段匹配，而不是按 api_base ================
+    # vLLM / 任意 OpenAI-compatible 本地服务
     ProviderSpec(
         name="vllm",
         keywords=("vllm",),
@@ -432,7 +433,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         backend="openai_compat",
         is_local=True,
     ),
-    # Ollama (local, OpenAI-compatible)
+    # Ollama（本地，OpenAI-compatible）
     ProviderSpec(
         name="ollama",
         keywords=("ollama", "nemotron"),
@@ -443,7 +444,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         detect_by_base_keyword="11434",
         default_api_base="http://localhost:11434/v1",
     ),
-    # LM Studio (local, OpenAI-compatible)
+    # LM Studio（本地，OpenAI-compatible）
     ProviderSpec(
         name="lm_studio",
         keywords=("lm-studio", "lmstudio", "lm_studio"),
@@ -454,7 +455,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         detect_by_base_keyword="1234",
         default_api_base="http://localhost:1234/v1",
     ),
-    # Atomic Chat (local, OpenAI-compatible) — https://atomic.chat/
+    # Atomic Chat（本地，OpenAI-compatible）— https://atomic.chat/
     ProviderSpec(
         name="atomic_chat",
         keywords=("atomic-chat", "atomic_chat", "atomicchat"),
@@ -465,7 +466,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         detect_by_base_keyword="1337",
         default_api_base="http://localhost:1337/v1",
     ),
-    # === OpenVINO Model Server (direct, local, OpenAI-compatible at /v3) ===
+    # === OpenVINO Model Server：本地直连，/v3 兼容 OpenAI ====================
     ProviderSpec(
         name="ovms",
         keywords=("openvino", "ovms"),
@@ -476,8 +477,8 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         is_local=True,
         default_api_base="http://localhost:8000/v3",
     ),
-    # === NVIDIA NIM (NVIDIA Inference Microservices) =======================
-    # Keys start with "nvapi-", base URL at integrate.api.nvidia.com
+    # === NVIDIA NIM（NVIDIA Inference Microservices）=======================
+    # key 通常以 "nvapi-" 开头，base URL 位于 integrate.api.nvidia.com。
     ProviderSpec(
         name="nvidia",
         keywords=("nvidia", "nemotron", "nvapi"),
@@ -489,8 +490,8 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         detect_by_base_keyword="nvidia.com",
         default_api_base="https://integrate.api.nvidia.com/v1",
     ),
-    # === Auxiliary (not a primary LLM provider) ============================
-    # Groq: mainly used for Whisper voice transcription, also usable for LLM
+    # === 辅助型 Provider（不是主聊天 LLM 的首选）===========================
+    # Groq：常用于 Whisper 语音转写，也可以直接承担 LLM 调用。
     ProviderSpec(
         name="groq",
         keywords=("groq",),
@@ -499,8 +500,9 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         backend="openai_compat",
         default_api_base="https://api.groq.com/openai/v1",
     ),
-    # AssemblyAI: voice transcription only. It appears in provider settings so
-    # users can manage credentials, but WebUI excludes it from chat model pickers.
+    # AssemblyAI：仅用于语音转写。
+    # 它会出现在 Provider 配置里，方便用户管理凭证；
+    # 但 WebUI 不会把它放进聊天模型下拉列表。
     ProviderSpec(
         name="assemblyai",
         keywords=("assemblyai",),
@@ -510,7 +512,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         default_api_base="https://api.assemblyai.com/v2",
         is_transcription_only=True,
     ),
-    # Qianfan (百度千帆): OpenAI-compatible API
+    # Qianfan（百度千帆）：OpenAI-compatible API
     ProviderSpec(
         name="qianfan",
         keywords=("qianfan", "ernie"),
@@ -523,7 +525,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
 
 
 # ---------------------------------------------------------------------------
-# Lookup helpers
+# 查找辅助函数
 # ---------------------------------------------------------------------------
 
 

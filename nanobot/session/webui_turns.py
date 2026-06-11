@@ -1,4 +1,12 @@
-"""Session turn helpers for WebUI-capable WebSocket sessions."""
+"""面向 WebUI/WebSocket 会话的 turn 辅助逻辑。
+
+这个模块专门处理“带 WebUI 的 websocket 会话”和普通渠道会话之间的差异：
+
+- 给 WebUI 会话打标记
+- 自动生成会话标题
+- 向前端推送 turn 运行状态
+- 把通用运行时事件翻译成 WebUI 可消费的 websocket 消息
+"""
 
 from __future__ import annotations
 
@@ -35,13 +43,13 @@ TITLE_MAX_CHARS = 60
 TITLE_GENERATION_MAX_TOKENS = 96
 TITLE_GENERATION_REASONING_EFFORT = "none"
 
-# Wall-clock turn start per ``chat_id`` (websocket only). Survives browser refresh while the
-# gateway process stays up; cleared on idle/stop and implicitly dropped on restart.
+# 按 ``chat_id`` 记录 websocket 会话当前 turn 的真实开始时间。
+# 只存在于网关进程内存里：浏览器刷新后仍在，但网关重启后自然消失。
 _WEBSOCKET_TURN_WALL_STARTED_AT: dict[str, float] = {}
 
 
 def mark_webui_session(session: Session, metadata: dict[str, Any]) -> bool:
-    """Persist a WebUI marker only when the inbound websocket frame opted in."""
+    """只有入站 websocket frame 明确声明时，才给 session 打上 WebUI 标记。"""
     if metadata.get(WEBUI_SESSION_METADATA_KEY) is not True:
         return False
     session.metadata[WEBUI_SESSION_METADATA_KEY] = True
@@ -91,7 +99,7 @@ async def maybe_generate_webui_title(
     provider: LLMProvider,
     model: str,
 ) -> bool:
-    """Generate and persist a short title for WebUI-owned sessions only."""
+    """仅为 WebUI 持有的会话生成并持久化一个短标题。"""
     session = sessions.get_or_create(session_key)
     if session.metadata.get(WEBUI_SESSION_METADATA_KEY) is not True:
         return False
@@ -180,7 +188,7 @@ async def maybe_generate_webui_title_after_turn(
 
 
 def websocket_turn_wall_started_at(chat_id: str) -> float | None:
-    """Return ``time.time()`` when the active user turn began, if still running."""
+    """如果某个 websocket 用户 turn 仍在运行，返回它的开始时间。"""
     return _WEBSOCKET_TURN_WALL_STARTED_AT.get(chat_id)
 
 
@@ -188,7 +196,7 @@ def build_bus_progress_callback(
     bus: MessageBus,
     msg: InboundMessage,
 ) -> Callable[..., Awaitable[None]]:
-    """Compatibility wrapper for the generic bus progress callback."""
+    """对通用 bus 进度回调做一层兼容包装。"""
     return bus_progress.build_bus_progress_callback(bus, msg)
 
 
@@ -199,7 +207,7 @@ async def publish_turn_run_status(
     *,
     started_at: float | None = None,
 ) -> None:
-    """Notify WebSocket clients while a user turn is executing (timing strip)."""
+    """在用户 turn 运行期间，把状态变化推送给 WebSocket 客户端。"""
     if msg.channel != "websocket":
         return
     cid = str(msg.chat_id)
@@ -228,7 +236,7 @@ async def publish_turn_run_status(
 
 @dataclass
 class WebuiTurnCoordinator:
-    """Translate generic runtime events into WebUI/WebSocket wire messages."""
+    """把通用运行时事件翻译成 WebUI/WebSocket 侧可消费的消息。"""
 
     bus: MessageBus
     sessions: SessionManager
@@ -236,7 +244,7 @@ class WebuiTurnCoordinator:
     _title_contexts: dict[str, LLMRuntime] = field(default_factory=dict)
 
     def subscribe(self, runtime_events: RuntimeEventBus) -> Callable[[], None]:
-        """Subscribe this coordinator to runtime events."""
+        """把当前协调器订阅到运行时事件总线上。"""
         unsubscribe = [
             runtime_events.subscribe(
                 self._handle_session_turn_started,

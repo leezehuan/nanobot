@@ -31,6 +31,7 @@ def map_finish_reason(status: str | None) -> str:
 
 
 def _usage_from_response_obj(response: Any) -> dict[str, int]:
+    """从 Responses 响应对象中抽取统一的 usage 统计。"""
     usage_raw = response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
     if not usage_raw:
         return {}
@@ -50,6 +51,7 @@ def _usage_from_response_obj(response: Any) -> dict[str, int]:
 
 
 def _parse_tool_call_arguments(args_raw: Any, name: str | None) -> Any:
+    """解析工具参数；若解析失败则保留原值并记告警。"""
     parsed = parse_tool_arguments(args_raw)
     if parsed == args_raw and isinstance(args_raw, str) and args_raw.strip():
         logger.warning(
@@ -61,6 +63,7 @@ def _parse_tool_call_arguments(args_raw: Any, name: str | None) -> Any:
 
 
 def _tool_arguments_source(*values: Any) -> Any:
+    """从多个候选值里挑出第一个真正有内容的参数来源。"""
     for value in values:
         if value is None:
             continue
@@ -71,10 +74,14 @@ def _tool_arguments_source(*values: Any) -> Any:
 
 
 async def iter_sse(response: httpx.Response) -> AsyncGenerator[dict[str, Any], None]:
-    """逐条产出 Responses API SSE 流中的 JSON 事件。"""
+    """逐条解析并产出 Responses API SSE 流中的 JSON 事件。
+
+    SSE 本质上是“按空行分隔的一段段文本事件”，这里负责把它刷成 JSON 对象。
+    """
     buffer: list[str] = []
 
     def _flush() -> dict[str, Any] | None:
+        """把当前缓冲区中的一条 SSE 事件刷成 JSON。"""
         data_lines = [line[5:].strip() for line in buffer if line.startswith("data:")]
         buffer.clear()
         if not data_lines:
@@ -109,7 +116,10 @@ async def consume_sse(
     on_content_delta: Callable[[str], Awaitable[None]] | None = None,
     on_tool_call_delta: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
 ) -> tuple[str, list[ToolCallRequest], str]:
-    """消费 SSE 流，并提取文本、工具调用和 finish_reason。"""
+    """消费 SSE 流，并提取正文、工具调用和 finish_reason。
+
+    这是不关心 reasoning 的轻量包装版本。
+    """
     content, tool_calls, finish_reason, _, _ = await consume_sse_with_reasoning(
         response,
         on_content_delta=on_content_delta,
@@ -124,7 +134,15 @@ async def consume_sse_with_reasoning(
     on_tool_call_delta: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     on_reasoning_delta: Callable[[str], Awaitable[None]] | None = None,
 ) -> tuple[str, list[ToolCallRequest], str, dict[str, int], str | None]:
-    """消费 SSE 流，并额外收集可见 reasoning 摘要。"""
+    """消费 SSE 流，并额外收集 reasoning 摘要。
+
+    这是 Responses API 流式解析的核心入口。它会把零散事件聚合成：
+    - 完整正文
+    - 工具调用列表
+    - finish_reason
+    - usage
+    - reasoning_content
+    """
     content = ""
     tool_calls: list[ToolCallRequest] = []
     tool_call_buffers: dict[str, dict[str, Any]] = {}
@@ -139,6 +157,8 @@ async def consume_sse_with_reasoning(
         if event_type == "response.output_item.added":
             item = event.get("item") or {}
             if item.get("type") == "function_call":
+                # 工具调用会先创建一个 function_call item，
+                # 真正的 arguments 往往在后续 delta 事件里逐步补全。
                 call_id = item.get("call_id")
                 if not call_id:
                     continue
@@ -155,11 +175,13 @@ async def consume_sse_with_reasoning(
                         "arguments_delta": "",
                     })
         elif event_type == "response.output_text.delta":
+            # 普通文本增量：一边累积到最终内容，一边转发给上层流式回调。
             delta_text = event.get("delta") or ""
             content += delta_text
             if on_content_delta and delta_text:
                 await on_content_delta(delta_text)
         elif event_type == "response.reasoning_summary_text.delta":
+            # reasoning 摘要也可能按增量流式输出。
             delta_text = event.get("delta") or ""
             if delta_text:
                 reasoning_content = (reasoning_content or "") + delta_text
@@ -180,6 +202,7 @@ async def consume_sse_with_reasoning(
                 if on_reasoning_delta:
                     await on_reasoning_delta(text)
         elif event_type == "response.function_call_arguments.delta":
+            # 工具参数是增量式的，所以要按 call_id 做缓冲拼接。
             call_id = event.get("call_id")
             if call_id and call_id in tool_call_buffers:
                 delta = event.get("delta") or ""
@@ -208,6 +231,7 @@ async def consume_sse_with_reasoning(
         elif event_type == "response.output_item.done":
             item = event.get("item") or {}
             if item.get("type") == "function_call":
+                # 当 function_call item 完结时，才真正组装成 ToolCallRequest。
                 call_id = item.get("call_id")
                 if not call_id:
                     continue
@@ -238,6 +262,7 @@ async def consume_sse_with_reasoning(
                     if on_reasoning_delta:
                         await on_reasoning_delta(summary)
         elif event_type == "response.completed":
+            # 整体响应结束事件，通常带最终 status / usage / output。
             response_obj = event.get("response") or {}
             status = response_obj.get("status")
             finish_reason = map_finish_reason(status)
@@ -274,7 +299,7 @@ def _extract_reasoning_summary_from_output(output: Any) -> str | None:
 
 
 def parse_response_output(response: Any) -> LLMResponse:
-    """把 SDK ``Response`` 对象解析成统一的 ``LLMResponse``。"""
+    """把非流式 SDK ``Response`` 对象解析成统一 ``LLMResponse``。"""
     if not isinstance(response, dict):
         dump = getattr(response, "model_dump", None)
         response = dump() if callable(dump) else vars(response)
@@ -291,6 +316,7 @@ def parse_response_output(response: Any) -> LLMResponse:
 
         item_type = item.get("type")
         if item_type == "message":
+            # assistant 文本通常以 message -> content -> output_text 的层级出现。
             for block in item.get("content") or []:
                 if not isinstance(block, dict):
                     dump = getattr(block, "model_dump", None)
@@ -298,6 +324,7 @@ def parse_response_output(response: Any) -> LLMResponse:
                 if block.get("type") == "output_text":
                     content_parts.append(block.get("text") or "")
         elif item_type == "reasoning":
+            # reasoning 的 summary 文本会被拼成一个展示摘要。
             for s in item.get("summary") or []:
                 if not isinstance(s, dict):
                     dump = getattr(s, "model_dump", None)
@@ -305,6 +332,7 @@ def parse_response_output(response: Any) -> LLMResponse:
                 if s.get("type") == "summary_text" and s.get("text"):
                     reasoning_content = (reasoning_content or "") + s["text"]
         elif item_type == "function_call":
+            # 非流式模式下，工具调用直接作为 output item 给出。
             call_id = item.get("call_id") or ""
             item_id = item.get("id") or "fc_0"
             args_raw = _tool_arguments_source(item.get("arguments"))
@@ -334,7 +362,11 @@ async def consume_sdk_stream(
     on_content_delta: Callable[[str], Awaitable[None]] | None = None,
     on_tool_call_delta: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
 ) -> tuple[str, list[ToolCallRequest], str, dict[str, int], str | None]:
-    """消费 OpenAI SDK 的异步 Responses 流。"""
+    """消费 OpenAI SDK 的异步 Responses 流。
+
+    和 ``consume_sse_with_reasoning`` 类似，但这里面对的是 SDK 已解码好的事件对象，
+    而不是原始 HTTP SSE 文本流。
+    """
     content = ""
     tool_calls: list[ToolCallRequest] = []
     tool_call_buffers: dict[str, dict[str, Any]] = {}
@@ -344,6 +376,7 @@ async def consume_sdk_stream(
     reasoning_content: str | None = None
 
     async for event in stream:
+        # SDK 不同版本的事件对象形态可能略有差异，所以这里用防御式属性读取。
         event_type = getattr(event, "type", None)
         if event_type == "response.output_item.added":
             item = getattr(event, "item", None)

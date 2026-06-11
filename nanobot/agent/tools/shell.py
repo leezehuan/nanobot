@@ -197,9 +197,9 @@ class ExecTool(Tool):
             r">\s*/dev/sd",                  # write to disk
             r"\b(shutdown|reboot|poweroff)\b",  # system power
             r":\(\)\s*\{.*\};\s*:",          # fork bomb
-            # Block writes to nanobot internal state files (#2989).
-            # history.jsonl / .dream_cursor are managed by append_history();
-            # direct writes corrupt the cursor format and crash /dream.
+            # 禁止直接写入 nanobot 内部状态文件（#2989）。
+            # history.jsonl / .dream_cursor 由 append_history() 统一维护；
+            # 直接写会破坏游标格式，进而导致 /dream 流程崩溃。
             r">>?\s*\S*(?:history\.jsonl|\.dream_cursor)",            # > / >> redirect
             r"\btee\b[^|;&<>]*(?:history\.jsonl|\.dream_cursor)",     # tee / tee -a
             r"\b(?:cp|mv)\b(?:\s+[^\s|;&<>]+)+\s+\S*(?:history\.jsonl|\.dream_cursor)",  # cp/mv target
@@ -223,7 +223,7 @@ class ExecTool(Tool):
     _MAX_TIMEOUT = 600
     _MAX_OUTPUT = 10_000
 
-    # Kernel device files safe as stdio redirect targets (#3599).
+    # 这些内核设备文件可以安全作为标准输入输出重定向目标（#3599）。
     _BENIGN_DEVICE_PATHS: frozenset[str] = frozenset({
         "/dev/null",
         "/dev/zero",
@@ -631,7 +631,7 @@ class ExecTool(Tool):
                 enabled=self.webui_allow_local_service_access,
             ),
         ):
-            # The runner turns this marker into a non-retryable security hint.
+            # Runner 会把这个标记转成“不可重试的安全提示”。
             return "Error: Command blocked by safety guard (internal/private URL detected)"
 
         should_restrict = self.restrict_to_workspace if restrict_to_workspace is None else restrict_to_workspace

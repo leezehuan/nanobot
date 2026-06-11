@@ -1,21 +1,19 @@
-"""Strip internal subagent inject scaffolding for human-facing channel surfaces.
+"""子 Agent 展示清洗工具：把内部 subagent 注入文本裁剪成人类可读版本。
 
-Persisted subagent announcements mirror ``agent/subagent_announce.md``: header,
-full ``Task:`` assignment (model context), ``Result:``, and a trailing model-only
-``Summarize…`` instruction. External channels (embedded WebUI, session previews)
-should show only the header plus a truncated result body."""
+持久化到磁盘的 subagent 结果通常包含完整任务说明和给模型看的额外提示，
+但这些内容不适合直接展示到外部渠道，因此这里负责做“面向用户的裁剪版”。
+"""
 
 from __future__ import annotations
 
 from typing import Any
 
-# Cap Result section length so WebSocket session replay stays readable; full text
-# remains on disk for LLM replay (we only mutate outgoing API copies in websocket).
+# 限制展示给渠道的 Result 长度；完整文本仍然保留在磁盘/内部上下文中。
 _SUBAGENT_CHANNEL_RESULT_MAX_CHARS = 800
 
 
 def scrub_subagent_announce_body(content: str) -> str:
-    """Return channel-safe text derived from a full subagent announce blob."""
+    """把完整 subagent announce 文本裁剪成适合渠道展示的版本。"""
     stripped = content.replace("\r\n", "\n").strip()
     lines = stripped.splitlines()
     header = ""
@@ -47,7 +45,7 @@ def scrub_subagent_announce_body(content: str) -> str:
 
 
 def scrub_subagent_messages_for_channel(messages: list[dict[str, Any]]) -> None:
-    """Mutate message dicts in place when they carry ``subagent_result`` inject."""
+    """原地修改消息列表中携带 ``subagent_result`` 注入的消息内容。"""
     for msg in messages:
         if not isinstance(msg, dict):
             continue

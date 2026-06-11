@@ -263,7 +263,7 @@ class MemoryStore:
         max_chars: int | None = None,
         session_key: str | None = None,
     ) -> int:
-     """向 ``history.jsonl`` 追加一条记录，并返回自增游标 ``cursor``。
+        """向 ``history.jsonl`` 追加一条记录，并返回自增游标 ``cursor``。
 
         关键行为：
 
@@ -272,20 +272,8 @@ class MemoryStore:
         - 每条记录都有单调递增的 ``cursor``，后续 Dream / 压缩流程靠它判断
           “哪些历史已经处理过”
 
-        ``max_chars`` 是兜底保险，防止调用方忘记限长后，把超大文本直接写进历史文件。
-        """Append *entry* to history.jsonl and return its auto-incrementing cursor.
-
-        Entries are passed through `strip_think` to drop template-level leaks
-        (e.g. unclosed `<think` prefixes, `<channel|>` markers) before being
-        persisted. If the cleaned content is empty but the raw entry wasn't,
-        the record is persisted with an empty string rather than falling back
-        to the raw leak — otherwise `strip_think`'s guarantees would be
-        undone by history replay / consolidation downstream.
-
-        A defensive cap (*max_chars*, default ``_HISTORY_ENTRY_HARD_CAP``) is
-        applied as a final safety net: individual callers should cap their own
-        content more tightly; this default only exists to catch unintentional
-        large writes (e.g. an LLM echoing its input back as a "summary").
+        ``max_chars`` 是最后一道兜底保险，防止调用方忘记限长后，
+        把超大文本直接写进历史文件。正常情况下，各上层调用方仍应先自行控长。
         """
         limit = max_chars if max_chars is not None else _HISTORY_ENTRY_HARD_CAP
         ts = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -379,7 +367,13 @@ class MemoryStore:
         session_key: str | None,
         unified_session: bool = False,
     ) -> list[dict[str, Any]]:
-        """Return unprocessed history entries safe to inject into a turn prompt."""
+        """读取适合注入到当前回合提示词里的“未处理历史”。
+
+        这里的关键不是“把新历史全拿出来”，而是：
+        - 普通会话模式下，只拿当前 session 的增量历史
+        - unified_session 模式下，允许共享非内部任务历史
+        - 明确排除 cron / dream 这类内部 session 的噪声
+        """
         entries = self.read_unprocessed_history(since_cursor=since_cursor)
         if session_key is None:
             return entries
@@ -572,9 +566,11 @@ class MemoryStore:
         max_chars: int | None = None,
         session_key: str | None = None,
     ) -> None:
-        """降级兜底：当 LLM 摘要失败时，直接把原始消息归档到 history。"""
+        """降级兜底：当 LLM 摘要失败时，直接把原始消息归档到 history。
 
-        """Fallback: dump raw messages to history.jsonl without LLM summarization."""
+        这样即使压缩模型临时不可用，我们也不会丢失历史，只是把这段历史
+        以较原始的 ``[RAW]`` 形式保存下来，后续仍可追溯。
+        """
         limit = max_chars if max_chars is not None else _RAW_ARCHIVE_MAX_CHARS
         formatted = truncate_text(self._format_messages(messages), limit)
         self.append_history(
@@ -846,9 +842,8 @@ class Consolidator:
     ) -> str | None:
         """调用 LLM 摘要一批旧消息，并把摘要写入 history。
 
-        """Summarize messages via LLM and append to history.jsonl.
-
-        成功返回摘要文本；没有内容可归档时返回 ``None``。
+        成功时返回摘要文本；没有内容可归档时返回 ``None``。
+        如果摘要失败，则会自动走 ``raw_archive()`` 做降级保存。
         """
         if not messages:
             return None
@@ -968,10 +963,10 @@ class Consolidator:
                 # 无论摘要成功还是失败，都推进 last_consolidated：
                 # 失败时 archive() 已经做了 raw_archive 兜底，
                 # 下次再处理同一段只会产生重复 [RAW] 记录。
-                # Advance the cursor either way: on success the chunk was
-                # summarized; on failure archive() already raw-archived it as
-                # a breadcrumb. Re-archiving the same chunk on the next call
-                # would just emit duplicate [RAW] entries.
+                # 无论结果如何，都要推进边界：
+                # 成功时，这段历史已经变成摘要；
+                # 失败时，archive() 也已经用 raw_archive 留下“面包屑”。
+                # 如果下次还从同一段重新归档，只会制造重复的 [RAW] 记录。
                 if summary:
                     last_summary = summary
                 session.last_consolidated = end_idx

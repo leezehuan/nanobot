@@ -1,4 +1,4 @@
-"""Utilities for redirecting stdlib logging to loguru."""
+"""日志桥接工具：把标准库 logging 的日志重定向到 loguru。"""
 from __future__ import annotations
 
 import logging
@@ -7,7 +7,7 @@ from loguru import logger
 
 
 class _LoguruBridge(logging.Handler):
-    """Route stdlib log records into loguru with consistent formatting."""
+    """把标准 logging 的 LogRecord 转发到 loguru，并统一格式。"""
 
     _LEVEL_MAP: dict[int, str] = {
         logging.DEBUG: "DEBUG",
@@ -22,6 +22,7 @@ class _LoguruBridge(logging.Handler):
         self.lib_name = lib_name
 
     def emit(self, record: logging.LogRecord) -> None:
+        """处理一条标准库日志记录，并按 loguru 方式输出。"""
         level = self._LEVEL_MAP.get(record.levelno, "INFO")
         frame, depth = logging.currentframe(), 2
         while frame and frame.f_code.co_filename == logging.__file__:
@@ -32,11 +33,9 @@ class _LoguruBridge(logging.Handler):
 
 
 def redirect_lib_logging(name: str, level: str | None = None) -> None:
-    """Redirect stdlib logging from *name* into loguru.
+    """把指定库的 stdlib logging 重定向到 loguru。
 
-    Adds a bridge handler if one is not already present and disables
-    propagation so messages are not duplicated.  When *level* is None the
-    handler does not filter — loguru's own level controls visibility.
+    这样第三方库日志就能和 nanobot 自己的 loguru 日志使用同一套展示风格。
     """
     lib_logger = logging.getLogger(name)
     if not any(isinstance(h, _LoguruBridge) for h in lib_logger.handlers):

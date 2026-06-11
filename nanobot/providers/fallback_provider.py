@@ -1,4 +1,10 @@
-"""Provider wrapper that transparently fails over to fallback models on error."""
+"""Provider 包装器：主模型失败时自动切换到备用模型。
+
+这个文件解决的是“模型可用性”问题：
+- 主模型偶发超时、限流、连接失败时，不让整次请求直接报错
+- 自动尝试备用模型，尽量维持服务连续性
+- 对持续故障的主模型做简单熔断，避免每次都白白浪费一次请求
+"""
 
 from __future__ import annotations
 
@@ -10,7 +16,7 @@ from loguru import logger
 
 from nanobot.providers.base import LLMProvider, LLMResponse
 
-# Circuit breaker tuned to match OpenAICompatProvider's Responses API breaker.
+# 熔断参数：与 OpenAICompatProvider 的 Responses API 熔断策略保持大致一致。
 _PRIMARY_FAILURE_THRESHOLD = 3
 _PRIMARY_COOLDOWN_S = 60
 _MISSING = object()
@@ -56,22 +62,21 @@ _FALLBACK_ERROR_TOKENS = (
 
 
 class FallbackProvider(LLMProvider):
-    """Wrap a primary provider and transparently failover to fallback models.
+    """带自动降级能力的 Provider 包装器。
 
-    When the primary model returns a fallbackable error before content has been
-    streamed, the wrapper tries each fallback model in order. Streamed timeout
-    errors are the recovery exception: the caller may close the current stream
-    segment, then the wrapper continues failover with later deltas in a new
-    segment. Each fallback model may reside on a different provider — a factory
-    callable creates the underlying provider on-the-fly.
+    【中文名称】主备模型切换 Provider
 
-    Key design:
-    - Failover is request-scoped (the wrapper itself is stateless between turns).
-    - Skipped when content was already streamed to avoid duplicate output,
-      except timeout recovery can resume in a new stream segment.
-    - Recursive failover is prevented by the factory returning plain providers.
-    - Primary provider is circuit-broken after repeated failures to avoid
-      wasting requests on a known-bad endpoint.
+    【核心思想】
+
+    先使用主 provider；如果错误类型属于“临时不可用”而不是“请求本身有问题”，
+    就按顺序尝试 fallback 模型。
+
+    【设计重点】
+
+    - failover 是单次请求级的，不跨 turn 保存业务状态
+    - 若正文已经流式输出，通常不再切换，避免重复内容
+    - “流中途超时”是一个特例：允许新开一个流段继续输出
+    - 主模型连续失败达到阈值后会短暂熔断
     """
 
     supports_stream_recover_callback = True
@@ -105,11 +110,14 @@ class FallbackProvider(LLMProvider):
         return bool(getattr(self._primary, "supports_progress_deltas", False))
 
     def _primary_available(self) -> bool:
-        """Return True if the primary provider is not currently tripped."""
+        """判断主 provider 当前是否允许再尝试。
+
+        若已进入熔断状态，只有冷却时间过去后才允许进行一次“半开探测”。
+        """
         if self._primary_tripped_at is None:
             return True
         if time.monotonic() - self._primary_tripped_at >= _PRIMARY_COOLDOWN_S:
-            # Half-open: allow one probe attempt.
+            # 半开状态：允许再探测一次，看看主模型是否已经恢复。
             return True
         return False
 
@@ -149,6 +157,7 @@ class FallbackProvider(LLMProvider):
         has_streamed: list[bool] | None,
         on_stream_recover: Callable[[], Awaitable[None]] | None = None,
     ) -> LLMResponse:
+        """先试主模型，必要时按顺序切换到 fallback 模型。"""
         primary_model = kwargs.get("model") or self._primary.get_default_model()
 
         if self._primary_available():
@@ -159,6 +168,8 @@ class FallbackProvider(LLMProvider):
                 return response
 
             if has_streamed is not None and has_streamed[0]:
+                # 流式输出已经把正文发给用户后，普通失败不应再切换，否则会重复回答。
+                # 只有“中途超时”这种情况，才允许结束当前流段后再继续。
                 is_timeout = (response.error_kind or "").lower() == "timeout"
                 if is_timeout:
                     logger.warning(
@@ -237,6 +248,8 @@ class FallbackProvider(LLMProvider):
                 )
                 continue
 
+            # 临时把模型名、max_tokens、temperature 等参数切换为 fallback 的值，
+            # 调用结束后再恢复，避免污染调用方原始 kwargs。
             original_values = {
                 name: kwargs.get(name, _MISSING)
                 for name in ("model", "max_tokens", "temperature", "reasoning_effort")
@@ -275,10 +288,10 @@ class FallbackProvider(LLMProvider):
             "All {} fallback model(s) failed",
             len(self._fallback_presets),
         )
-        # Return the last error response we saw (primary or last fallback).
+        # 全部失败时，优先返回最后一次真实失败的响应对象。
         if last_response is not None:
             return last_response
-        # Primary was tripped and we have no fallbacks — synthesize an error.
+        # 如果主模型已经熔断且没有 fallback，就构造一个明确错误。
         return LLMResponse(
             content=f"Primary model '{primary_model}' circuit open and no fallbacks available",
             finish_reason="error",
@@ -286,6 +299,12 @@ class FallbackProvider(LLMProvider):
 
     @staticmethod
     def _should_fallback(response: LLMResponse) -> bool:
+        """判断当前错误是否属于“应该尝试降级”的类型。
+
+        大致原则：
+        - 权限、认证、内容过滤、请求参数错误：不降级
+        - 超时、限流、连接错误、5xx、服务过载：允许降级
+        """
         if response.error_should_retry is False:
             return False
         status = response.error_status_code

@@ -29,14 +29,18 @@ def convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str
         content = msg.get("content")
 
         if role == "system":
+            # Responses API 常把 system 指令放在顶层 ``instructions`` 字段里，
+            # 而不是和普通 input item 混在一起。
             system_prompt = content if isinstance(content, str) else ""
             continue
 
         if role == "user":
+            # 用户消息需要进一步拆成 input_text / input_image 等多模态片段。
             input_items.append(convert_user_message(content))
             continue
 
         if role == "assistant":
+            # assistant 的普通文本回复要转成 completed message item。
             if isinstance(content, str) and content:
                 message_id = _unique_item_id(f"msg_{idx}", used_item_ids)
                 input_items.append({
@@ -45,6 +49,7 @@ def convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str
                     "status": "completed", "id": message_id,
                 })
             for tool_call in msg.get("tool_calls", []) or []:
+                # assistant 发出的工具调用，要改写成 Responses API 的 function_call item。
                 fn = tool_call.get("function") or {}
                 call_id, item_id = split_tool_call_id(tool_call.get("id"))
                 response_item_id = _unique_item_id(item_id or f"fc_{idx}", used_item_ids)
@@ -58,6 +63,7 @@ def convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str
             continue
 
         if role == "tool":
+            # 工具执行结果对应 Responses API 里的 function_call_output item。
             call_id, _ = split_tool_call_id(msg.get("tool_call_id"))
             output_text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
             input_items.append({"type": "function_call_output", "call_id": call_id, "output": output_text})
@@ -68,7 +74,7 @@ def convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str
 def convert_user_message(content: Any) -> dict[str, Any]:
     """把用户消息内容转换成 Responses API 结构。
 
-    支持：
+    支持的输入：
 
     - 纯字符串
     - ``text`` 块 -> ``input_text``
@@ -93,7 +99,14 @@ def convert_user_message(content: Any) -> dict[str, Any]:
 
 
 def convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """把工具 schema 从 Chat Completions 风格拍平成 Responses API 风格。"""
+    """把工具 schema 从 Chat Completions 风格拍平成 Responses API 风格。
+
+    Chat Completions 常见结构：
+    ``{"type": "function", "function": {...}}``
+
+    Responses API 更偏扁平：
+    ``{"type": "function", "name": "...", "parameters": {...}}``
+    """
     converted: list[dict[str, Any]] = []
     for tool in tools:
         fn = (tool.get("function") or {}) if tool.get("type") == "function" else tool
@@ -111,7 +124,11 @@ def convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _unique_item_id(item_id: str, used: set[str]) -> str:
-    """确保同一个 Responses 请求里的 item id 唯一。"""
+    """确保同一个 Responses 请求里的 item id 唯一。
+
+    因为 assistant 文本、tool call、tool output 都会拆成多个 item，
+    一旦 ID 冲突，上游就可能无法正确关联调用链。
+    """
     if item_id not in used:
         used.add(item_id)
         return item_id

@@ -1,4 +1,10 @@
-"""OpenAI Codex Responses Provider."""
+"""OpenAI Codex Provider：使用 Codex OAuth 登录态调用 Responses API。
+
+它和普通 OpenAI API provider 的主要区别在于：
+- 不是直接依赖用户手填 API Key
+- 使用 Codex / ChatGPT 体系里的登录态令牌
+- 最终仍然把结果整理成 nanobot 统一的 ``LLMResponse`` 结构
+"""
 
 from __future__ import annotations
 
@@ -25,7 +31,10 @@ DEFAULT_ORIGINATOR = "nanobot"
 
 
 class OpenAICodexProvider(LLMProvider):
-    """Use Codex OAuth to call the Responses API."""
+    """通过 Codex OAuth 调用 Responses API 的 Provider。
+
+    你可以把它理解为“Codex 身份体系”和“nanobot LLMProvider 抽象”之间的桥接层。
+    """
 
     supports_progress_deltas = True
 
@@ -44,10 +53,19 @@ class OpenAICodexProvider(LLMProvider):
         on_thinking_delta: Callable[[str], Awaitable[None]] | None = None,
         on_tool_call_delta: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
     ) -> LLMResponse:
-        """Shared request logic for both chat() and chat_stream()."""
+        """``chat()`` 与 ``chat_stream()`` 共用的主请求逻辑。
+
+        这里会完成：
+        1. 把 nanobot 消息转换为 Responses API 输入
+        2. 读取 Codex 登录令牌
+        3. 构造请求头和请求体
+        4. 发起 SSE 流式请求
+        5. 汇总为统一的 ``LLMResponse``
+        """
         model = model or self.default_model
         system_prompt, input_items = convert_messages(messages)
 
+        # token 读取可能包含本地阻塞 I/O，因此放到线程里执行。
         token = await asyncio.to_thread(get_codex_token)
         headers = _build_headers(token.account_id, token.access)
 
@@ -78,6 +96,7 @@ class OpenAICodexProvider(LLMProvider):
                     on_tool_call_delta=on_tool_call_delta,
                 )
             except Exception as e:
+                # 某些本地环境证书链不完整，这里对证书校验失败做一次兜底重试。
                 if "CERTIFICATE_VERIFY_FAILED" not in str(e):
                     raise
                 logger.warning("SSL verification failed for Codex API; retrying with verify=False")
@@ -144,13 +163,18 @@ class OpenAICodexProvider(LLMProvider):
 
 
 def _strip_model_prefix(model: str) -> str:
+    """去掉 ``openai-codex/`` 这类 provider 前缀，保留上游实际模型名。"""
     if model.startswith("openai-codex/") or model.startswith("openai_codex/"):
         return model.split("/", 1)[1]
     return model
 
 
 def _build_reasoning_options(reasoning_effort: str | None) -> dict[str, str] | None:
-    """Opt in to visible summaries without changing provider-default effort."""
+    """构造 reasoning 选项。
+
+    默认会请求 summary，方便上层展示 reasoning 摘要；
+    如果用户明确指定 ``none``，则尊重这个关闭意图。
+    """
     if reasoning_effort and reasoning_effort.lower() == "none":
         return {"effort": "none"}
     options = {"summary": "auto"}
@@ -160,6 +184,7 @@ def _build_reasoning_options(reasoning_effort: str | None) -> dict[str, str] | N
 
 
 def _build_headers(account_id: str, token: str) -> dict[str, str]:
+    """构造请求 Codex Responses 端点时所需的 HTTP 头。"""
     return {
         "Authorization": f"Bearer {token}",
         "chatgpt-account-id": account_id,
@@ -172,6 +197,14 @@ def _build_headers(account_id: str, token: str) -> dict[str, str]:
 
 
 class _CodexHTTPError(RuntimeError):
+    """带额外 HTTP 元数据的内部异常类型。
+
+    这样上层在统一处理异常时，不只知道“失败了”，还能拿到：
+    - 状态码
+    - retry_after
+    - error_type / error_code
+    - 是否值得重试
+    """
     def __init__(
         self,
         message: str,
@@ -199,6 +232,7 @@ async def _request_codex(
     on_thinking_delta: Callable[[str], Awaitable[None]] | None = None,
     on_tool_call_delta: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
 ) -> tuple[str, list[ToolCallRequest], str, dict[str, int], str | None]:
+    """发起一次 Codex 流式请求，并消费 SSE 响应。"""
     idle_timeout_s = int(os.environ.get("NANOBOT_STREAM_IDLE_TIMEOUT_S", "90"))
     async with httpx.AsyncClient(timeout=idle_timeout_s, verify=verify) as client:
         async with client.stream("POST", url, headers=headers, json=body) as response:
@@ -215,6 +249,7 @@ async def _request_codex(
                     error_code=error_code,
                     should_retry=_should_retry_status(response.status_code, error_type, error_code, raw),
                 )
+            # 统一复用 Responses 流解析器，把正文、工具调用、reasoning 摘要都解析出来。
             return await consume_sse_with_reasoning(
                 response,
                 on_content_delta=on_content_delta,
@@ -224,11 +259,13 @@ async def _request_codex(
 
 
 def _prompt_cache_key(messages: list[dict[str, Any]]) -> str:
+    """根据前几条消息生成稳定哈希，用于上游 prompt cache。"""
     raw = json.dumps(messages, ensure_ascii=True, sort_keys=True)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def _friendly_error(status_code: int, raw: str) -> str:
+    """把上游错误改写成更适合展示的短文本。"""
     _ = raw
     if status_code == 429:
         return "ChatGPT usage quota exceeded or rate limit triggered. Please try again later."
@@ -236,7 +273,15 @@ def _friendly_error(status_code: int, raw: str) -> str:
 
 
 def _codex_error_response(exc: Exception) -> LLMResponse:
-    """Convert Codex transport/API failures into actionable, retryable metadata."""
+    """把 Codex 传输层/API 层异常转换成统一的 ``LLMResponse`` 错误对象。
+
+    这样上层不需要分别理解 ``httpx`` 超时、网络异常、HTTP 状态异常，
+    只需要读取统一字段，例如：
+    - ``finish_reason``
+    - ``error_kind``
+    - ``retry_after``
+    - ``error_should_retry``
+    """
     exc_type = "CodexHTTPError" if isinstance(exc, _CodexHTTPError) else type(exc).__name__
     detail = str(exc).strip()
 
@@ -287,7 +332,7 @@ def _codex_error_response(exc: Exception) -> LLMResponse:
 
 
 def _codex_log_summary(exc_type: str, response: LLMResponse) -> str:
-    """Return a bounded diagnostic summary without request body or raw upstream payload."""
+    """生成长度受控的错误摘要，避免把原始上游 payload 全量打进日志。"""
     if response.error_status_code is not None:
         parts = [f"HTTP {response.error_status_code}"]
         if response.error_type:
@@ -309,6 +354,7 @@ def _should_retry_status(
     error_code: str | None,
     content: str | None,
 ) -> bool:
+    """根据状态码和错误信息判断本次失败是否值得重试。"""
     if status_code == 429:
         return LLMProvider._is_retryable_429_response(
             LLMResponse(

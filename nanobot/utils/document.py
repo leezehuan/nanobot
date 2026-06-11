@@ -1,4 +1,10 @@
-"""Document text extraction utilities for nanobot."""
+"""文档文本提取工具：把附件尽量转成模型可理解的纯文本。
+
+这是多模态输入链路里很关键的一层：
+- 图片通常保留给视觉模型处理
+- PDF / DOCX / XLSX / PPTX / 纯文本文件则尽量抽出正文
+- 抽出的文本会被拼接回用户输入上下文，供 LLM 阅读
+"""
 
 import mimetypes
 from pathlib import Path
@@ -7,14 +13,14 @@ from loguru import logger
 
 from nanobot.utils.helpers import detect_image_mime
 
-# Supported file extensions for text extraction
+# 当前支持尝试提取文本的扩展名集合。
 SUPPORTED_EXTENSIONS: set[str] = {
-    # Document formats
+    # 文档格式
     ".pdf",
     ".docx",
     ".xlsx",
     ".pptx",
-    # Text formats
+    # 纯文本/结构化文本格式
     ".txt",
     ".md",
     ".csv",
@@ -28,7 +34,7 @@ SUPPORTED_EXTENSIONS: set[str] = {
     ".toml",
     ".ini",
     ".cfg",
-    # Image formats (for future OCR support)
+    # 图片格式（当前主要作为占位；未来可扩展 OCR）
     ".png",
     ".jpg",
     ".jpeg",
@@ -40,14 +46,14 @@ _MAX_TEXT_LENGTH = 200_000
 
 
 def extract_text(path: Path) -> str | None:
-    """Extract text from a file.
+    """根据文件类型选择合适的提取策略。
 
-    Args:
-        path: Path to the file.
+    返回值约定：
+    - 成功：提取出的文本
+    - 不支持的类型：``None``
+    - 出错：形如 ``[error: ...]`` 的错误文本
 
-    Returns:
-        Extracted text as string, None for unsupported types,
-        or error string for failures.
+    这样调用方可以不抛异常地继续拼装上下文。
     """
     if not isinstance(path, Path):
         path = Path(path)
@@ -57,9 +63,7 @@ def extract_text(path: Path) -> str | None:
 
     ext = path.suffix.lower()
 
-    # Document formats -- each branch lazily imports its parser so that
-    # startup does not pay the ~25 MB cost of loading openpyxl /
-    # python-docx / python-pptx / pypdf up front (see issue #3422).
+    # 各格式解析器都采用延迟导入，避免进程启动时一次性加载大量文档库。
     if ext == ".pdf":
         return _extract_pdf(path)
     elif ext == ".docx":
@@ -71,15 +75,15 @@ def extract_text(path: Path) -> str | None:
     elif _is_text_extension(ext):
         return _extract_text_file(path)
     elif ext in {".png", ".jpg", ".jpeg", ".gif", ".webp"}:
-        # Image files - for future OCR support
+        # 图片暂时不在这里做 OCR，只返回一个可读占位。
         return f"[image: {path.name}]"
     else:
-        # Unsupported extension
+        # 当前未支持的扩展名直接返回 None，让上层决定如何处理。
         return None
 
 
 def _extract_pdf(path: Path) -> str:
-    """Extract text from PDF using pypdf."""
+    """使用 ``pypdf`` 提取 PDF 文本。"""
     try:
         from pypdf import PdfReader
     except ImportError:
@@ -97,7 +101,7 @@ def _extract_pdf(path: Path) -> str:
 
 
 def _extract_docx(path: Path) -> str:
-    """Extract text from DOCX using python-docx."""
+    """使用 ``python-docx`` 提取 DOCX 文本。"""
     try:
         from docx import Document as DocxDocument
     except ImportError:
@@ -112,7 +116,7 @@ def _extract_docx(path: Path) -> str:
 
 
 def _extract_xlsx(path: Path) -> str:
-    """Extract text from XLSX using openpyxl."""
+    """使用 ``openpyxl`` 提取 XLSX 中的单元格文本。"""
     try:
         from openpyxl import load_workbook
     except ImportError:
@@ -139,7 +143,7 @@ def _extract_xlsx(path: Path) -> str:
 
 
 def _extract_pptx(path: Path) -> str:
-    """Extract text from PPTX using python-pptx."""
+    """使用 ``python-pptx`` 提取 PPTX 中的幻灯片文本。"""
     try:
         from pptx import Presentation as PptxPresentation
     except ImportError:
@@ -160,10 +164,11 @@ def _extract_pptx(path: Path) -> str:
 
 
 def _collect_pptx_shape_text(shape, out: list[str]) -> None:
-    """Collect text from a PPTX shape, recursing into groups and tables.
+    """递归收集一个 PPTX shape 里的文本。
 
-    Groups have ``has_text_frame=False`` and must be walked via ``.shapes``;
-    tables are GraphicFrame objects whose cell text lives under ``.table``.
+    PPTX 里的“可见内容”不一定都在 ``shape.text``：
+    - 组合图形需要继续遍历 ``.shapes``
+    - 表格内容要从 ``.table`` 里读 cell 文本
     """
     sub_shapes = getattr(shape, "shapes", None)
     if sub_shapes is not None:
@@ -185,9 +190,9 @@ def _collect_pptx_shape_text(shape, out: list[str]) -> None:
 
 
 def _extract_text_file(path: Path) -> str:
-    """Extract text from a plain text file."""
+    """读取纯文本文件内容。"""
     try:
-        # Try UTF-8 first, then latin-1 fallback
+        # 先尝试 UTF-8；失败时退回 latin-1，尽量不要因为编码问题整份文件都读不了。
         try:
             content = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
@@ -199,14 +204,14 @@ def _extract_text_file(path: Path) -> str:
 
 
 def _truncate(text: str, max_length: int) -> str:
-    """Truncate text with a suffix indicating truncation."""
+    """按长度上限截断文本，并补一个说明后缀。"""
     if len(text) <= max_length:
         return text
     return text[:max_length] + f"... (truncated, {len(text)} chars total)"
 
 
 def _is_text_extension(ext: str) -> bool:
-    """Check if extension is a text format."""
+    """判断扩展名是否属于直接按文本读取的格式。"""
     return ext in {
         ".txt",
         ".md",
@@ -225,17 +230,16 @@ def _is_text_extension(ext: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# High-level helper: split media into images + extracted document text
+# 更高层的辅助函数：把附件拆成“交给视觉模型的图片”和“可直接抽文本的文档”。
 # ---------------------------------------------------------------------------
 
 _MAX_EXTRACT_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
 
 
 def is_image_file(path: str) -> bool:
-    """Check whether *path* looks like an image file.
+    """判断一个文件是否像图片。
 
-    Uses magic-byte detection (reads first 16 bytes) with a ``mimetypes``
-    extension-based fallback.
+    优先通过文件头 magic bytes 判断；如果拿不到，再退回扩展名 / mimetype 猜测。
     """
     p = Path(path)
     mime: str | None = None
@@ -253,10 +257,9 @@ def is_image_file(path: str) -> bool:
 def reference_non_image_attachments(
     content: str, media: list[str],
 ) -> tuple[str, list[str]]:
-    """Separate images from non-image attachments without reading file content.
+    """把附件分成图片和非图片，但不读取非图片正文。
 
-    Image paths are preserved for downstream vision-block construction.
-    Non-image paths are appended as ``[Attachment: path]`` references.
+    适合只想保留“这个附件存在”的引用信息，而不做全文提取的场景。
     """
     image_paths: list[str] = []
     attachment_refs: list[str] = []
@@ -277,15 +280,13 @@ def extract_documents(
     *,
     max_file_size: int = _MAX_EXTRACT_FILE_SIZE,
 ) -> tuple[str, list[str]]:
-    """Separate images from documents in *media_paths*.
+    """把附件拆成“图片”和“可提取文本的文档”。
 
-    Documents (PDF, DOCX, XLSX, PPTX, plain-text, …) have their text
-    extracted and appended to *text*.  Only image paths are kept in the
-    returned list so that downstream layers only need to handle vision
-    blocks.
+    处理结果：
+    - 图片路径继续保留，交给后续视觉块构造逻辑
+    - 文档文本会被提取并拼接到 ``text`` 末尾
 
-    Files larger than *max_file_size* bytes are skipped with a warning
-    to avoid unbounded memory / CPU usage.
+    之所以限制文件大小，是为了避免单个超大附件把内存或 CPU 吃爆。
     """
     image_paths: list[str] = []
     doc_texts: list[str] = []

@@ -1,4 +1,10 @@
-"""Tool hint formatting for concise, human-readable tool call display."""
+"""工具提示格式化：把 tool call 压缩成人类容易扫读的短提示。
+
+例如把：
+``read_file(path='D:/Project/nanobot/very/long/path/foo.py')``
+压缩成更适合进度条或聊天气泡展示的：
+``read …/foo.py``
+"""
 
 from __future__ import annotations
 
@@ -6,7 +12,8 @@ import re
 
 from nanobot.utils.path import abbreviate_path
 
-# Registry: tool_name -> (key_args, template, is_path, is_command)
+# 注册表格式：
+# tool_name -> (优先读取哪些参数, 渲染模板, 是否按路径缩写, 是否按命令缩写)
 _TOOL_FORMATS: dict[str, tuple[list[str], str, bool, bool]] = {
     "read_file":  (["path", "file_path"],              "read {}",     True,  False),
     "write_file": (["path", "file_path"],              "write {}",    True,  False),
@@ -20,7 +27,7 @@ _TOOL_FORMATS: dict[str, tuple[list[str], str, bool, bool]] = {
     "list_dir":   (["path"],                           "ls {}",       True,  False),
 }
 
-# Matches file paths embedded in shell commands, including quoted paths with spaces.
+# 匹配 shell 命令里嵌入的路径，支持带空格的单引号/双引号路径。
 _PATH_IN_CMD_RE = re.compile(
     r'"(?P<double>(?:[A-Za-z]:[/\\]|~/|/)[^"]+)"'
     r"|'(?P<single>(?:[A-Za-z]:[/\\]|~/|/)[^']+)'"
@@ -29,7 +36,12 @@ _PATH_IN_CMD_RE = re.compile(
 
 
 def format_tool_hints(tool_calls: list, max_length: int = 40) -> str:
-    """Format tool calls as concise hints with smart abbreviation."""
+    """把一组 tool call 格式化成短提示字符串。
+
+    额外做了两件体验优化：
+    - 对路径和命令做智能缩写
+    - 连续重复的相同提示会折叠成 ``× N`` 形式
+    """
     if not tool_calls:
         return ""
 
@@ -56,7 +68,7 @@ def format_tool_hints(tool_calls: list, max_length: int = 40) -> str:
 
 
 def _get_args(tc) -> dict:
-    """Extract args dict from tc.arguments, handling list/dict/None/empty."""
+    """从 ``tc.arguments`` 中安全提取参数字典。"""
     if tc.arguments is None:
         return {}
     if isinstance(tc.arguments, list):
@@ -67,7 +79,7 @@ def _get_args(tc) -> dict:
 
 
 def _extract_arg(tc, key_args: list[str]) -> str | None:
-    """Extract the first available value from preferred key names."""
+    """按优先级提取最适合展示的那个字符串参数。"""
     args = _get_args(tc)
     if not isinstance(args, dict):
         return None
@@ -82,7 +94,7 @@ def _extract_arg(tc, key_args: list[str]) -> str | None:
 
 
 def _fmt_known(tc, fmt: tuple, max_length: int = 40) -> str:
-    """Format a registered tool using its template."""
+    """按注册表模板格式化一个已知工具。"""
     if not fmt[0] and "{}" not in fmt[1]:
         return fmt[1]
     val = _extract_arg(tc, fmt[0])
@@ -96,7 +108,7 @@ def _fmt_known(tc, fmt: tuple, max_length: int = 40) -> str:
 
 
 def _abbreviate_command(cmd: str, max_len: int = 40) -> str:
-    """Abbreviate paths in a command string, then truncate."""
+    """先缩写命令中的路径，再在整体长度上做截断。"""
     path_max = max(max_len // 2, 25)
 
     def _replace_path(match: re.Match[str]) -> str:
@@ -113,7 +125,7 @@ def _abbreviate_command(cmd: str, max_len: int = 40) -> str:
 
 
 def _fmt_mcp(tc, max_length: int = 40) -> str:
-    """Format MCP tool as server::tool."""
+    """把 MCP 工具格式化成 ``server::tool`` 风格。"""
     name = tc.name
     if "__" in name:
         parts = name.split("__", 1)
@@ -134,7 +146,7 @@ def _fmt_mcp(tc, max_length: int = 40) -> str:
 
 
 def _fmt_fallback(tc, max_length: int = 40) -> str:
-    """Original formatting logic for unregistered tools."""
+    """未知工具的兜底格式化逻辑。"""
     args = _get_args(tc)
     val = next(iter(args.values()), None) if isinstance(args, dict) else None
     if not isinstance(val, str):
