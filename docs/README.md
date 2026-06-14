@@ -15,17 +15,17 @@ If you find a docs mistake, outdated command, or confusing step, please open an 
 | You are | Start with | Then use |
 |---|---|---|
 | New to terminals and config files | [`start-without-technical-background.md`](./start-without-technical-background.md) | [`troubleshooting.md`](./troubleshooting.md) if the first reply fails |
-| Comfortable pasting commands and JSON | [`quick-start.md`](./quick-start.md) | [`provider-cookbook.md`](./provider-cookbook.md) for pasteable provider setups |
-| Operating a long-running bot | [`concepts.md`](./concepts.md) | [`chat-apps.md`](./chat-apps.md), [`../webui/README.md`](../webui/README.md), and [`deployment.md`](./deployment.md) |
-| Integrating or extending nanobot | [`architecture.md`](./architecture.md) | [`configuration.md`](./configuration.md), [`openai-api.md`](./openai-api.md), [`python-sdk.md`](./python-sdk.md), [`development.md`](./development.md), and [`channel-plugin-guide.md`](./channel-plugin-guide.md) |
+| Comfortable pasting commands and JSON | [`quick-start.md`](./quick-start.md) (中文: [`快速开始.md`](./快速开始.md)) | [`provider-cookbook.md`](./provider-cookbook.md) for pasteable provider setups |
+| Operating a long-running bot | [`concepts.md`](./concepts.md) (中文: [`核心概念.md`](./核心概念.md)) | [`chat-apps.md`](./chat-apps.md), [`../webui/README.md`](../webui/README.md), and [`deployment.md`](./deployment.md) |
+| Integrating or extending nanobot | [`architecture.md`](./architecture.md) (中文: [`架构说明.md`](./架构说明.md)) | [`configuration.md`](./configuration.md), [`openai-api.md`](./openai-api.md), [`python-sdk.md`](./python-sdk.md), [`development.md`](./development.md), and [`channel-plugin-guide.md`](./channel-plugin-guide.md) |
 
 ## Start Here
 
 | Goal | Read | Outcome |
 |---|---|---|
 | Start with no technical background | [`start-without-technical-background.md`](./start-without-technical-background.md) | One-command setup, terminal basics, config, API keys, and the first reply |
-| Install and get the first reply | [`quick-start.md`](./quick-start.md) | A working CLI agent and a known-good config path |
-| Understand how the pieces fit | [`concepts.md`](./concepts.md) | Mental model for config, workspace, gateway, channels, tools, memory, and sessions |
+| Install and get the first reply | [`quick-start.md`](./quick-start.md) (中文: [`快速开始.md`](./快速开始.md)) | A working CLI agent and a known-good config path |
+| Understand how the pieces fit | [`concepts.md`](./concepts.md) (中文: [`核心概念.md`](./核心概念.md)) | Mental model for config, workspace, gateway, channels, tools, memory, and sessions |
 | Choose or change a model provider | [`providers.md`](./providers.md) | Correct provider/model pairing without reading the full config reference |
 | Copy a provider setup recipe | [`provider-cookbook.md`](./provider-cookbook.md) | Pasteable OpenRouter, OpenAI, Anthropic, local model, fallback, and Langfuse setups |
 | Fix a first-run or runtime problem | [`troubleshooting.md`](./troubleshooting.md) | A diagnosis order and targeted checks for common failures |
@@ -62,8 +62,8 @@ If a local `nanobot agent` session can already answer normally, you can also ask
 |---|---|---|
 | Full configuration schema | [`configuration.md`](./configuration.md) | Exact fields, defaults, provider tables, web tools, MCP, security, and runtime options |
 | CLI commands | [`cli-reference.md`](./cli-reference.md) | Command names, common flags, and entrypoints |
-| Architecture | [`architecture.md`](./architecture.md) | Source-level runtime map for core flow, providers, channels, tools, WebUI, memory, security, and extension points |
-| Project learning guide | [`project-learning-guide.zh-CN.md`](./project-learning-guide.zh-CN.md) | Chinese, from overall architecture to detailed reading order with per-file pre-reading notes |
+| Architecture | [`architecture.md`](./architecture.md) (中文: [`架构说明.md`](./架构说明.md)) | Source-level runtime map for core flow, providers, channels, tools, WebUI, memory, security, and extension points |
+| Project learning guide | [`项目学习指南.md`](./项目学习指南.md) | Chinese, from overall architecture to detailed reading order with per-file pre-reading notes |
 | Development | [`development.md`](./development.md) | Contributor notes for adding providers and transcription adapters |
 | Memory | [`memory.md`](./memory.md) | Session history, Dream consolidation, memory files, and versioning |
 | Observability | [`configuration.md#langfuse-observability`](./configuration.md#langfuse-observability) | Langfuse tracing setup and required environment variables |
