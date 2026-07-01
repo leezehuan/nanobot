@@ -147,14 +147,23 @@ class ExecTool(Tool):
 
     @classmethod
     def config_cls(cls):
+        """config cls。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         return ExecToolConfig
 
     @classmethod
     def enabled(cls, ctx: Any) -> bool:
+        """enabled。
+        
+        实现方法：从输入值和当前配置中提取关键标志，按布尔条件组合判断，并把异常或空值按保守结果处理。"""
         return ctx.config.exec.enable
 
     @classmethod
     def create(cls, ctx: Any) -> Tool:
+        """create。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         cfg = ctx.config.exec
         return cls(
             working_dir=ctx.workspace,
@@ -184,6 +193,9 @@ class ExecTool(Tool):
         allowed_env_keys: list[str] | None = None,
         session_manager: Any | None = None,
     ):
+        """init。
+        
+        初始化 ExecTool 实例。实现方法：把构造参数保存到实例字段，创建后续调用需要复用的缓存、状态容器或运行时依赖。"""
         self.timeout = timeout
         self.working_dir = working_dir
         self.sandbox = sandbox
@@ -218,6 +230,9 @@ class ExecTool(Tool):
 
     @property
     def name(self) -> str:
+        """name。
+        
+        返回工具或 provider 对外暴露的稳定名称。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return "exec"
 
     _MAX_TIMEOUT = 600
@@ -238,6 +253,9 @@ class ExecTool(Tool):
 
     @property
     def description(self) -> str:
+        """description。
+        
+        返回给模型看的能力说明，帮助模型判断何时调用本工具。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return (
             "Execute a shell command and return its output. "
             "Use this for tests, builds, package commands, git commands, and "
@@ -253,6 +271,9 @@ class ExecTool(Tool):
 
     @property
     def exclusive(self) -> bool:
+        """exclusive。
+        
+        声明工具是否需要独占执行，避免和其他工具并发造成状态冲突。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return True
 
     async def execute(
@@ -264,7 +285,9 @@ class ExecTool(Tool):
         max_output_tokens: int | None = None,
         **kwargs: Any,
     ) -> str:
-        """执行 shell 命令，支持一次性模式和可轮询会话模式。"""
+        """执行 shell 命令，支持一次性模式和可轮询会话模式。
+        
+        实现方法：先校验参数和运行时上下文，再调用具体工具逻辑；异常会被包装成模型可继续修正的文本结果。"""
         command = command or cmd
         working_dir = working_dir or workdir
         if not command:
@@ -336,6 +359,9 @@ class ExecTool(Tool):
         yield_time_ms: int | None,
         max_output_chars: int | None,
     ) -> str:
+        """execute session。
+        
+        实现方法：先校验参数和运行时上下文，再调用具体工具逻辑；异常会被包装成模型可继续修正的文本结果。"""
         try:
             session_id, poll = await self._session_manager.start(
                 command=prepared.command,
@@ -364,6 +390,8 @@ class ExecTool(Tool):
 
         - 模型本次调用传入的 timeout：会被上限钳住
         - 系统默认配置 timeout：管理员可以设置得更宽松
+
+        实现方法：先规范化名字或路径，再结合配置、预设和默认值得到最终可执行对象。
         """
         if timeout:
             return min(timeout, self._MAX_TIMEOUT)
@@ -379,7 +407,9 @@ class ExecTool(Tool):
         shell: str | None = None,
         login: bool | None = None,
     ) -> _PreparedCommand | str:
-        """准备命令、环境、工作目录，并在真正执行前完成安全检查。"""
+        """准备命令、环境、工作目录，并在真正执行前完成安全检查。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         access = current_tool_workspace(
             self.working_dir,
             restrict_to_workspace=self.restrict_to_workspace,
@@ -449,6 +479,9 @@ class ExecTool(Tool):
         )
 
     def _compose_path(self, current_path: str) -> str:
+        """compose path。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         parts = []
         if self.path_prepend:
             parts.append(self.path_prepend)
@@ -459,6 +492,9 @@ class ExecTool(Tool):
         return os.pathsep.join(parts)
 
     def _wrap_path_export(self, command: str, env: dict[str, str]) -> str:
+        """wrap path export。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         segments = []
         if self.path_prepend:
             env["NANOBOT_PATH_PREPEND"] = self.path_prepend
@@ -478,7 +514,9 @@ class ExecTool(Tool):
         *,
         stdin: int = asyncio.subprocess.DEVNULL,
     ) -> asyncio.subprocess.Process:
-        """按平台差异启动子进程。"""
+        """按平台差异启动子进程。
+        
+        实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
         if _IS_WINDOWS:
             if "\n" in command:
                 # 多行命令在 Windows 上更适合显式走 PowerShell。
@@ -515,7 +553,9 @@ class ExecTool(Tool):
 
     @staticmethod
     def _resolve_shell(shell: str | None) -> tuple[str | None, str | None]:
-        """解析并校验用户指定的 shell。"""
+        """解析并校验用户指定的 shell。
+        
+        实现方法：先规范化名字或路径，再结合配置、预设和默认值得到最终可执行对象。"""
         if not shell:
             return None, None
         if _IS_WINDOWS:
@@ -541,7 +581,9 @@ class ExecTool(Tool):
 
     @staticmethod
     async def _kill_process(process: asyncio.subprocess.Process) -> None:
-        """强制结束子进程，并尽量回收，避免僵尸进程。"""
+        """强制结束子进程，并尽量回收，避免僵尸进程。
+        
+        实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
         process.kill()
         try:
             with suppress(asyncio.TimeoutError):
@@ -561,6 +603,8 @@ class ExecTool(Tool):
 
         Windows 下没有完全对应的 login profile 机制，因此会手动传一组
         更完整的系统变量，但默认仍不透传 API key 等敏感值。
+
+        实现方法：从配置、上下文和运行时状态收集所需字段，再组装成后续组件可直接使用的数据结构。
         """
         if _IS_WINDOWS:
             sr = os.environ.get("SYSTEMROOT", r"C:\Windows")
@@ -607,7 +651,9 @@ class ExecTool(Tool):
         *,
         restrict_to_workspace: bool | None = None,
     ) -> str | None:
-        """对潜在危险命令做“尽力而为”的前置安全拦截。"""
+        """对潜在危险命令做“尽力而为”的前置安全拦截。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         cmd = command.strip()
         lower = cmd.lower()
 
@@ -673,7 +719,9 @@ class ExecTool(Tool):
 
     @classmethod
     def _is_benign_device_path(cls, path: str) -> bool:
-        """判断是否属于可安全豁免的设备文件路径。"""
+        """判断是否属于可安全豁免的设备文件路径。
+        
+        实现方法：从输入值和当前配置中提取关键标志，按布尔条件组合判断，并把异常或空值按保守结果处理。"""
         if path in cls._BENIGN_DEVICE_PATHS:
             return True
         return path.startswith("/dev/fd/")
@@ -682,6 +730,9 @@ class ExecTool(Tool):
     def _extract_absolute_paths(command: str) -> list[str]:
         # 提取命令里可能出现的绝对路径，供工作区边界检查使用。
         # Windows 既支持盘符路径，也支持 UNC 路径。
+        """extract absolute paths。
+        
+        实现方法：从对象、字典或响应块中按候选路径提取目标值，提取失败时返回空值而不是中断主流程。"""
         win_paths = re.findall(
             r"(?<![A-Za-z])(?:[A-Za-z]:[^\s\"'|><;]*|\\\\[^\s\"'|><;]+(?:\\[^\s\"'|><;]+)*)",
             command

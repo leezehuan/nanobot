@@ -37,7 +37,9 @@ def _resolve_model_preset(
     preset_name: str | None = None,
     preset: ModelPresetConfig | None = None,
 ) -> ModelPresetConfig:
-    """解析本次要使用的模型预设。"""
+    """解析本次要使用的模型预设。
+    
+    实现方法：先规范化名字或路径，再结合配置、预设和默认值得到最终可执行对象。"""
     return preset if preset is not None else config.resolve_preset(preset_name)
 
 
@@ -48,7 +50,11 @@ def _make_provider_core(
     preset: ModelPresetConfig | None = None,
     model: str | None = None,
 ) -> LLMProvider:
-    """创建一个“纯 Provider”，不包 fallback 逻辑。"""
+    """创建一个“纯 Provider”，不包 fallback 逻辑。
+    
+    实现方法：先解析模型预设并从配置中找 provider/spec/backend，再按 backend 分支实例化
+    OpenAI-compatible、Anthropic、Azure、Bedrock、Codex 或 Copilot provider；最后把预设里的生成参数写入
+    provider.generation。"""
     resolved = _resolve_model_preset(config, preset_name=preset_name, preset=preset)
     model = model or resolved.model
     provider_name = config.get_provider_name(model, preset=resolved)
@@ -126,7 +132,10 @@ def _inline_fallback_preset(
     primary: ModelPresetConfig,
     fallback: InlineFallbackConfig,
 ) -> ModelPresetConfig:
-    """把内联 fallback 配置扩展成完整的 ``ModelPresetConfig``。"""
+    """把内联 fallback 配置扩展成完整的 ``ModelPresetConfig``。
+    
+    实现方法：以 fallback 自己的 model/provider 为主，同时把未显式填写的 max_tokens、temperature、context_window_tokens
+    等字段从 primary 预设继承过来。"""
     return ModelPresetConfig(
         model=fallback.model,
         provider=fallback.provider,
@@ -144,7 +153,10 @@ def _inline_fallback_preset(
 
 
 def _resolve_fallback_presets(config: Config, primary: ModelPresetConfig) -> list[ModelPresetConfig]:
-    """解析主预设对应的所有 fallback 预设。"""
+    """解析主预设对应的所有 fallback 预设。
+    
+    实现方法：遍历 agents.defaults.fallback_models；字符串项按名字从 config.model_presets 取完整预设，内联对象则调用
+    _inline_fallback_preset 补齐默认值。"""
     presets: list[ModelPresetConfig] = []
     for fallback in config.agents.defaults.fallback_models:
         if isinstance(fallback, str):
@@ -192,6 +204,9 @@ def make_provider(
 
     【返回值】
     - LLMProvider: 可直接用于 chat() / chat_stream() 调用的 Provider 实例
+
+    实现方法：先创建不带 fallback 的主 provider，再解析 fallback 预设；如果有备用模型，就用 FallbackProvider 包装主 provider，并传入可按
+    fallback 预设重新创建 provider 的工厂函数。
     """
     resolved = _resolve_model_preset(config, preset_name=preset_name, preset=preset)
     provider = _make_provider_core(config, preset_name=preset_name, preset=preset, model=model)
@@ -219,12 +234,18 @@ def provider_signature(
 
     这个签名会被用来判断：
     “当前运行时 provider 配置是否真的变化了，需要热更新吗？”
+
+    实现方法：把模型名、provider 名、API key/base、extra headers/body/query、区域配置、生成参数和 fallback
+    签名都打进元组；只要这些输入有变化，签名就会不同。
     """
     resolved = _resolve_model_preset(config, preset_name=preset_name, preset=preset)
     p = config.get_provider(resolved.model, preset=resolved)
     fallback_presets = _resolve_fallback_presets(config, resolved)
 
     def _fallback_signature(fallback: ModelPresetConfig) -> tuple[object, ...]:
+        """fallback signature。
+        
+        实现方法：读取 fallback 预设和它对应的 provider 配置，把模型/provider/API 参数/生成参数整理成可比较的不可变元组。"""
         fp = config.get_provider(fallback.model, preset=fallback)
         return (
             fallback.model,
@@ -270,7 +291,9 @@ def build_provider_snapshot(
     preset_name: str | None = None,
     preset: ModelPresetConfig | None = None,
 ) -> ProviderSnapshot:
-    """构建完整 ProviderSnapshot。"""
+    """构建完整 ProviderSnapshot。
+    
+    实现方法：从配置、上下文和运行时状态收集所需字段，再组装成后续组件可直接使用的数据结构。"""
     resolved = _resolve_model_preset(config, preset_name=preset_name, preset=preset)
     fallback_windows = [
         fallback.context_window_tokens
@@ -289,7 +312,9 @@ def load_provider_snapshot(
     *,
     preset_name: str | None = None,
 ) -> ProviderSnapshot:
-    """从磁盘配置文件加载并构建 ProviderSnapshot。"""
+    """从磁盘配置文件加载并构建 ProviderSnapshot。
+    
+    实现方法：先用 load_config 读取配置文件，再解析环境变量占位符，最后交给 build_provider_snapshot 生成可热切换的运行时快照。"""
     from nanobot.config.loader import load_config, resolve_config_env_vars
 
     return build_provider_snapshot(

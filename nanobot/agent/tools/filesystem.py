@@ -47,6 +47,9 @@ class _FsTool(Tool):
         restrict_to_workspace: bool | None = None,
         sandbox_restricts_workspace: bool = False,
     ):
+        """init。
+        
+        初始化 _FsTool 实例。实现方法：把构造参数保存到实例字段，创建后续调用需要复用的缓存、状态容器或运行时依赖。"""
         self._workspace = workspace
         self._allowed_dir = allowed_dir
         self._extra_allowed_dirs = extra_allowed_dirs
@@ -64,6 +67,9 @@ class _FsTool(Tool):
 
     @classmethod
     def create(cls, ctx: Any) -> Tool:
+        """create。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 
         # 如果启用了 restrict_to_workspace，或 shell sandbox 本身会限制 workspace，
@@ -86,12 +92,17 @@ class _FsTool(Tool):
 
     @property
     def _file_states(self) -> FileStates:
+        """file states。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         if self._explicit_file_states is not None:
             return self._explicit_file_states
         return current_file_states(self._fallback_file_states)
 
     def _resolve(self, path: str) -> Path:
-        """把用户/模型给出的相对路径解析成受安全边界约束的绝对路径。"""
+        """把用户/模型给出的相对路径解析成受安全边界约束的绝对路径。
+        
+        实现方法：先规范化名字或路径，再结合配置、预设和默认值得到最终可执行对象。"""
         access = current_tool_workspace(
             self._workspace,
             restrict_to_workspace=self._restrict_to_workspace,
@@ -105,6 +116,9 @@ class _FsTool(Tool):
         )
 
     def _display_workspace(self) -> Path | None:
+        """display workspace。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         return current_tool_workspace(self._workspace).project_path
 
 
@@ -126,6 +140,8 @@ def _is_blocked_device(path: str | Path) -> bool:
 
     例如 ``/dev/zero``、``/dev/random`` 这类设备如果允许读取，
     很容易造成无限输出、阻塞或挂死。
+
+    实现方法：从输入值和当前配置中提取关键标志，按布尔条件组合判断，并把异常或空值按保守结果处理。
     """
     import re
     raw = str(path)
@@ -150,7 +166,9 @@ def _is_blocked_device(path: str | Path) -> bool:
 
 
 def _parse_page_range(pages: str, total: int) -> tuple[int, int]:
-    """把类似 ``2-5`` 的页码范围解析成 0 基区间。"""
+    """把类似 ``2-5`` 的页码范围解析成 0 基区间。
+    
+    实现方法：按响应或文本结构逐层读取字段，把缺失和异常格式归一化为 nanobot 内部对象。"""
     parts = pages.strip().split("-")
     if len(parts) == 1:
         p = int(parts[0])
@@ -191,10 +209,16 @@ class ReadFileTool(_FsTool):
 
     @property
     def name(self) -> str:
+        """name。
+        
+        返回工具或 provider 对外暴露的稳定名称。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return "read_file"
 
     @property
     def description(self) -> str:
+        """description。
+        
+        返回给模型看的能力说明，帮助模型判断何时调用本工具。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return (
             "Read a file (text, image, or document). "
             "Text output format: LINE_NUM|CONTENT. "
@@ -210,6 +234,9 @@ class ReadFileTool(_FsTool):
 
     @property
     def read_only(self) -> bool:
+        """read only。
+        
+        声明工具是否只读，供调度器判断并发和安全策略。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return True
 
     async def execute(
@@ -229,6 +256,8 @@ class ReadFileTool(_FsTool):
         3. 针对 PDF / Office / 图片走专门分支
         4. 普通文本按行分页读取
         5. 借助 file_state 做“未变化文件去重提示”
+
+        实现方法：先校验参数和运行时上下文，再调用具体工具逻辑；异常会被包装成模型可继续修正的文本结果。
         """
         try:
             if not path:
@@ -347,7 +376,9 @@ class ReadFileTool(_FsTool):
             return f"Error reading file: {e}"
 
     def _read_pdf(self, fp: Path, pages: str | None) -> str:
-        """读取 PDF 文本内容。"""
+        """读取 PDF 文本内容。
+        
+        实现方法：按安全路径解析目标，再读取内容并根据类型做截断、分页或格式转换。"""
         try:
             import fitz  # pymupdf
         except ImportError:
@@ -394,7 +425,9 @@ class ReadFileTool(_FsTool):
         return result
 
     def _read_office_doc(self, fp: Path) -> str:
-        """读取 Office 文档文本内容。"""
+        """读取 Office 文档文本内容。
+        
+        实现方法：按安全路径解析目标，再读取内容并根据类型做截断、分页或格式转换。"""
         from nanobot.utils.document import extract_text
 
         result = extract_text(fp)
@@ -439,10 +472,16 @@ class WriteFileTool(_FsTool):
 
     @property
     def name(self) -> str:
+        """name。
+        
+        返回工具或 provider 对外暴露的稳定名称。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return "write_file"
 
     @property
     def description(self) -> str:
+        """description。
+        
+        返回给模型看的能力说明，帮助模型判断何时调用本工具。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return (
             "Create a new file or intentionally replace an entire file with "
             "the provided content. Overwrites existing files and creates parent "
@@ -451,7 +490,9 @@ class WriteFileTool(_FsTool):
         )
 
     async def execute(self, path: str | None = None, content: str | None = None, **kwargs: Any) -> str:
-        """执行整文件写入。"""
+        """执行整文件写入。
+        
+        实现方法：先校验参数和运行时上下文，再调用具体工具逻辑；异常会被包装成模型可继续修正的文本结果。"""
         try:
             if not path:
                 raise ValueError("Unknown path")
@@ -480,10 +521,16 @@ _QUOTE_TABLE = str.maketrans({
 
 
 def _normalize_quotes(s: str) -> str:
+    """normalize quotes。
+    
+    实现方法：把输入统一成内部约定格式，处理大小写、空值、别名或 provider 差异。"""
     return s.translate(_QUOTE_TABLE)
 
 
 def _curly_double_quotes(text: str) -> str:
+    """curly double quotes。
+    
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
     parts: list[str] = []
     opening = True
     for ch in text:
@@ -496,6 +543,9 @@ def _curly_double_quotes(text: str) -> str:
 
 
 def _curly_single_quotes(text: str) -> str:
+    """curly single quotes。
+    
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
     parts: list[str] = []
     opening = True
     for i, ch in enumerate(text):
@@ -513,7 +563,9 @@ def _curly_single_quotes(text: str) -> str:
 
 
 def _preserve_quote_style(old_text: str, actual_text: str, new_text: str) -> str:
-    """在 quote-normalized 匹配成功时，尽量保留原文件的引号风格。"""
+    """在 quote-normalized 匹配成功时，尽量保留原文件的引号风格。
+    
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
     if _normalize_quotes(old_text.strip()) != _normalize_quotes(actual_text.strip()) or old_text == actual_text:
         return new_text
 
@@ -526,11 +578,16 @@ def _preserve_quote_style(old_text: str, actual_text: str, new_text: str) -> str
 
 
 def _leading_ws(line: str) -> str:
+    """leading ws。
+    
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
     return line[: len(line) - len(line.lstrip(" \t"))]
 
 
 def _reindent_like_match(old_text: str, actual_text: str, new_text: str) -> str:
-    """尽量让替换后的文本沿用实际匹配块的外层缩进。"""
+    """尽量让替换后的文本沿用实际匹配块的外层缩进。
+    
+    实现方法：按精确、宽松或模式规则比较候选项，返回最可信的匹配结果。"""
     old_lines = old_text.split("\n")
     actual_lines = actual_text.split("\n")
     if len(old_lines) != len(actual_lines):
@@ -574,6 +631,9 @@ class _MatchSpan:
 
 
 def _find_exact_matches(content: str, old_text: str) -> list[_MatchSpan]:
+    """find exact matches。
+    
+    实现方法：按精确、宽松或模式规则比较候选项，返回最可信的匹配结果。"""
     matches: list[_MatchSpan] = []
     start = 0
     while True:
@@ -593,6 +653,9 @@ def _find_exact_matches(content: str, old_text: str) -> list[_MatchSpan]:
 
 
 def _find_trim_matches(content: str, old_text: str, *, normalize_quotes: bool = False) -> list[_MatchSpan]:
+    """find trim matches。
+    
+    实现方法：按精确、宽松或模式规则比较候选项，返回最可信的匹配结果。"""
     old_lines = old_text.splitlines()
     if not old_lines:
         return []
@@ -641,6 +704,9 @@ def _find_trim_matches(content: str, old_text: str, *, normalize_quotes: bool = 
 
 
 def _find_quote_matches(content: str, old_text: str) -> list[_MatchSpan]:
+    """find quote matches。
+    
+    实现方法：按精确、宽松或模式规则比较候选项，返回最可信的匹配结果。"""
     norm_content = _normalize_quotes(content)
     norm_old = _normalize_quotes(old_text)
     matches: list[_MatchSpan] = []
@@ -662,7 +728,9 @@ def _find_quote_matches(content: str, old_text: str) -> list[_MatchSpan]:
 
 
 def _find_matches(content: str, old_text: str) -> list[_MatchSpan]:
-    """按从严到松的策略逐级查找匹配。"""
+    """按从严到松的策略逐级查找匹配。
+    
+    实现方法：按精确、宽松或模式规则比较候选项，返回最可信的匹配结果。"""
     for matcher in (
         lambda: _find_exact_matches(content, old_text),
         lambda: _find_trim_matches(content, old_text),
@@ -676,11 +744,16 @@ def _find_matches(content: str, old_text: str) -> list[_MatchSpan]:
 
 
 def _collapse_internal_whitespace(text: str) -> str:
+    """collapse internal whitespace。
+    
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
     return "\n".join(" ".join(line.split()) for line in text.splitlines())
 
 
 def _diagnose_near_match(old_text: str, actual_text: str) -> list[str]:
-    """生成“为什么很接近但没精确匹配上”的可操作提示。"""
+    """生成“为什么很接近但没精确匹配上”的可操作提示。
+    
+    实现方法：按精确、宽松或模式规则比较候选项，返回最可信的匹配结果。"""
     hints: list[str] = []
 
     if old_text.lower() == actual_text.lower() and old_text != actual_text:
@@ -696,7 +769,9 @@ def _diagnose_near_match(old_text: str, actual_text: str) -> list[str]:
 
 
 def _best_window(old_text: str, content: str) -> tuple[float, int, list[str], list[str]]:
-    """找出最接近 old_text 的行窗口，便于报错诊断。"""
+    """找出最接近 old_text 的行窗口，便于报错诊断。
+    
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
     lines = content.splitlines(keepends=True)
     old_lines = old_text.splitlines(keepends=True)
     window = max(1, len(old_lines))
@@ -723,6 +798,8 @@ def _find_match(content: str, old_text: str) -> tuple[str | None, int]:
     1. 精确子串匹配
     2. 去行首尾空白后的窗口匹配
     3. 智能引号归一化匹配
+
+    实现方法：按精确、宽松或模式规则比较候选项，返回最可信的匹配结果。
     """
     matches = _find_matches(content, old_text)
     if not matches:
@@ -766,10 +843,16 @@ class EditFileTool(_FsTool):
 
     @property
     def name(self) -> str:
+        """name。
+        
+        返回工具或 provider 对外暴露的稳定名称。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return "edit_file"
 
     @property
     def description(self) -> str:
+        """description。
+        
+        返回给模型看的能力说明，帮助模型判断何时调用本工具。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return (
             "Perform a small, exact replacement in one file by replacing "
             "old_text with new_text. Use this for narrow text substitutions "
@@ -787,6 +870,8 @@ class EditFileTool(_FsTool):
         这样做可以减少很多无意义差异，例如：
         - 行尾多余空格
         - 因模型输出格式造成的尾随空白
+
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。
         """
         return "\n".join(line.rstrip() for line in text.split("\n"))
 
@@ -802,6 +887,8 @@ class EditFileTool(_FsTool):
         - 参数语义清晰
         - 失败时能给模型足够明确的诊断
         - 在多处匹配、缩进差异、引号差异时尽量可恢复
+
+        实现方法：先校验参数和运行时上下文，再调用具体工具逻辑；异常会被包装成模型可继续修正的文本结果。
         """
         try:
             if not path:
@@ -939,7 +1026,9 @@ class EditFileTool(_FsTool):
             return f"Error editing file: {e}"
 
     def _file_not_found_msg(self, path: str, fp: Path) -> str:
-        """生成带“你是不是想写这个路径？”建议的报错。"""
+        """生成带“你是不是想写这个路径？”建议的报错。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         parent = fp.parent
         suggestions: list[str] = []
         if parent.is_dir():
@@ -953,7 +1042,9 @@ class EditFileTool(_FsTool):
 
     @staticmethod
     def _not_found_msg(old_text: str, content: str, path: str) -> str:
-        """生成 old_text 未命中时的高质量诊断信息。"""
+        """生成 old_text 未命中时的高质量诊断信息。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         best_ratio, best_start, best_window_lines, hints = _best_window(old_text, content)
         if best_ratio > 0.5:
             diff = "\n".join(difflib.unified_diff(
@@ -1009,10 +1100,16 @@ class ListDirTool(_FsTool):
 
     @property
     def name(self) -> str:
+        """name。
+        
+        返回工具或 provider 对外暴露的稳定名称。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return "list_dir"
 
     @property
     def description(self) -> str:
+        """description。
+        
+        返回给模型看的能力说明，帮助模型判断何时调用本工具。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return (
             "List the contents of a directory. "
             "Set recursive=true to explore nested structure. "
@@ -1021,13 +1118,18 @@ class ListDirTool(_FsTool):
 
     @property
     def read_only(self) -> bool:
+        """read only。
+        
+        声明工具是否只读，供调度器判断并发和安全策略。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return True
 
     async def execute(
         self, path: str | None = None, recursive: bool = False,
         max_entries: int | None = None, **kwargs: Any,
     ) -> str:
-        """执行列目录。"""
+        """执行列目录。
+        
+        实现方法：先校验参数和运行时上下文，再调用具体工具逻辑；异常会被包装成模型可继续修正的文本结果。"""
         try:
             if path is None:
                 raise ValueError("Unknown path")

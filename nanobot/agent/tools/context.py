@@ -33,26 +33,37 @@ class RequestContext:
 class ContextAware(Protocol):
     """约定：支持运行时上下文注入的工具应实现 ``set_context``。"""
     def set_context(self, ctx: RequestContext) -> None:
+        """set context。
+        
+        实现方法：把新值写入实例状态，并同步更新依赖该状态的子组件或上下文变量。"""
         ...
 
 
 def bind_request_context(ctx: RequestContext) -> Token[RequestContext | None]:
-    """把当前请求上下文绑定到 ``contextvars``。"""
+    """把当前请求上下文绑定到 ``contextvars``。
+    
+    实现方法：根据当前运行模式选择同步或流式 provider 调用，并把回调、工具定义和超时参数传入。"""
     return _CURRENT_REQUEST_CONTEXT.set(ctx)
 
 
 def reset_request_context(token: Token[RequestContext | None]) -> None:
-    """恢复之前的请求上下文绑定状态。"""
+    """恢复之前的请求上下文绑定状态。
+    
+    实现方法：根据当前运行模式选择同步或流式 provider 调用，并把回调、工具定义和超时参数传入。"""
     _CURRENT_REQUEST_CONTEXT.reset(token)
 
 
 def current_request_context() -> RequestContext | None:
-    """获取当前异步任务绑定的请求上下文。"""
+    """获取当前异步任务绑定的请求上下文。
+    
+    实现方法：根据当前运行模式选择同步或流式 provider 调用，并把回调、工具定义和超时参数传入。"""
     return _CURRENT_REQUEST_CONTEXT.get()
 
 
 def current_request_session_key() -> str | None:
-    """快捷获取当前请求对应的 session_key。"""
+    """快捷获取当前请求对应的 session_key。
+    
+    实现方法：根据当前运行模式选择同步或流式 provider 调用，并把回调、工具定义和超时参数传入。"""
     ctx = current_request_context()
     return ctx.session_key if ctx else None
 

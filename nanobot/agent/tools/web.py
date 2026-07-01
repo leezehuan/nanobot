@@ -72,7 +72,9 @@ class WebToolsConfig(Base):
 
 
 def _strip_tags(text: str) -> str:
-    """去掉 HTML 标签，并解码 HTML 实体。"""
+    """去掉 HTML 标签，并解码 HTML 实体。
+    
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
     text = re.sub(r'<script[\s\S]*?</script>', '', text, flags=re.I)
     text = re.sub(r'<style[\s\S]*?</style>', '', text, flags=re.I)
     text = re.sub(r'<[^>]+>', '', text)
@@ -80,7 +82,9 @@ def _strip_tags(text: str) -> str:
 
 
 def _normalize(text: str) -> str:
-    """归一化空白字符，便于模型阅读。"""
+    """归一化空白字符，便于模型阅读。
+    
+    实现方法：把输入统一成内部约定格式，处理大小写、空值、别名或 provider 差异。"""
     text = re.sub(r'[ \t]+', ' ', text)
     return re.sub(r'\n{3,}', '\n\n', text).strip()
 
@@ -90,6 +94,8 @@ def _validate_url(url: str) -> tuple[bool, str]:
 
     这里只检查协议和域名，不检查解析后的 IP 是否安全。
     更严格的 SSRF 安全检查要用 ``_validate_url_safe``。
+
+    实现方法：先做格式与安全边界检查，再把失败原因转换成调用方可读的错误信息。
     """
     try:
         p = urlparse(url)
@@ -103,7 +109,9 @@ def _validate_url(url: str) -> tuple[bool, str]:
 
 
 def _validate_url_safe(url: str) -> tuple[bool, str]:
-    """做带 SSRF 防护的 URL 校验。"""
+    """做带 SSRF 防护的 URL 校验。
+    
+    实现方法：先做格式与安全边界检查，再把失败原因转换成调用方可读的错误信息。"""
     from nanobot.security.network import validate_url_target
 
     return validate_url_target(url)
@@ -114,7 +122,9 @@ async def _get_with_safe_redirects(
     url: str,
     headers: dict[str, str] | None = None,
 ) -> tuple[httpx.Response | None, str | None]:
-    """执行 GET 请求，并在每一次重定向前重新校验目标地址。"""
+    """执行 GET 请求，并在每一次重定向前重新校验目标地址。
+    
+    实现方法：优先从显式参数或实例状态读取目标值，缺失时回退到默认配置，并把结果整理成调用方期望的类型。"""
     current_url = url
     for _ in range(MAX_REDIRECTS + 1):
         is_valid, error_msg = _validate_url_safe(current_url)
@@ -147,7 +157,9 @@ async def _stream_with_safe_redirects(
     url: str,
     headers: dict[str, str] | None = None,
 ) -> tuple[httpx.Response | None, Any | None, str | None]:
-    """打开流式响应，并在每一跳重定向前先做安全校验。"""
+    """打开流式响应，并在每一跳重定向前先做安全校验。
+    
+    实现方法：逐块读取上游事件，把文本增量、工具调用增量和完成信号分别转发给调用方。"""
     current_url = url
     for _ in range(MAX_REDIRECTS + 1):
         is_valid, error_msg = _validate_url_safe(current_url)
@@ -182,7 +194,9 @@ async def _stream_with_safe_redirects(
 
 
 def _format_results(query: str, items: list[dict[str, Any]], n: int) -> str:
-    """把不同搜索提供商的结果整理成统一纯文本格式。"""
+    """把不同搜索提供商的结果整理成统一纯文本格式。
+    
+    实现方法：把结构化结果整理成用户或模型容易阅读的文本，必要时截断过长内容。"""
     if not items:
         return f"No results for: {query}"
     lines = [f"Results for: {query}\n"]
@@ -196,6 +210,9 @@ def _format_results(query: str, items: list[dict[str, Any]], n: int) -> str:
 
 
 def _normalize_volcengine_time_range(value: Any) -> str | None:
+    """normalize volcengine time range。
+    
+    实现方法：把输入统一成内部约定格式，处理大小写、空值、别名或 provider 差异。"""
     if value is None:
         return None
     time_range = str(value).strip()
@@ -210,6 +227,9 @@ def _normalize_volcengine_time_range(value: Any) -> str | None:
 
 
 def _normalize_volcengine_auth_level(value: Any) -> int | None:
+    """normalize volcengine auth level。
+    
+    实现方法：把输入统一成内部约定格式，处理大小写、空值、别名或 provider 差异。"""
     if value is None:
         return None
     try:
@@ -257,17 +277,29 @@ class WebSearchTool(Tool):
 
     @classmethod
     def config_cls(cls):
+        """config cls。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         return WebToolsConfig
 
     @classmethod
     def enabled(cls, ctx: Any) -> bool:
+        """enabled。
+        
+        实现方法：从输入值和当前配置中提取关键标志，按布尔条件组合判断，并把异常或空值按保守结果处理。"""
         return ctx.config.web.enable
 
     @classmethod
     def create(cls, ctx: Any) -> Tool:
+        """create。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         config_loader = None
         if ctx.provider_snapshot_loader is not None:
             def config_loader():
+                """config loader。
+                
+                实现方法：从配置、内置目录或入口点发现候选项，过滤不可用项后注册到运行时。"""
                 from nanobot.config.loader import load_config, resolve_config_env_vars
                 return resolve_config_env_vars(load_config()).tools.web.search
         return cls(
@@ -284,12 +316,18 @@ class WebSearchTool(Tool):
         user_agent: str | None = None,
         config_loader: Callable[[], WebSearchConfig] | None = None,
     ):
+        """init。
+        
+        初始化 WebSearchTool 实例。实现方法：把构造参数保存到实例字段，创建后续调用需要复用的缓存、状态容器或运行时依赖。"""
         self.config = config if config is not None else WebSearchConfig()
         self.proxy = proxy
         self.user_agent = user_agent if user_agent is not None else _DEFAULT_USER_AGENT
         self._config_loader = config_loader
 
     def _refresh_config(self) -> None:
+        """refresh config。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         if self._config_loader is None:
             return
         try:
@@ -301,6 +339,8 @@ class WebSearchTool(Tool):
         """解析本次真正会使用的搜索后端。
 
         某些 provider 需要 API key；如果没配，可能会自动回退到 DuckDuckGo。
+
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。
         """
         self._refresh_config()
         provider = self.config.provider.strip().lower() or "brave"
@@ -341,11 +381,16 @@ class WebSearchTool(Tool):
 
     @property
     def read_only(self) -> bool:
+        """read only。
+        
+        声明工具是否只读，供调度器判断并发和安全策略。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return True
 
     @property
     def exclusive(self) -> bool:
-        """DuckDuckGo 需要串行化，因为 ddgs 不是并发安全的。"""
+        """DuckDuckGo 需要串行化，因为 ddgs 不是并发安全的。
+        
+        声明工具是否需要独占执行，避免和其他工具并发造成状态冲突。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return self._effective_provider() == "duckduckgo"
 
     async def execute(
@@ -357,6 +402,9 @@ class WebSearchTool(Tool):
         query_rewrite: bool | None = None,
         **kwargs: Any,
     ) -> str:
+        """execute。
+        
+        实现方法：先校验参数和运行时上下文，再调用具体工具逻辑；异常会被包装成模型可继续修正的文本结果。"""
         self._refresh_config()
         provider = self.config.provider.strip().lower() or "brave"
         n = min(max(count or self.config.max_results, 1), 10)
@@ -395,6 +443,9 @@ class WebSearchTool(Tool):
             return f"Error: unknown search provider '{provider}'"
 
     async def _search_olostep(self, query: str, n: int) -> str:
+        """search olostep。
+        
+        实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
         try:
             from olostep import AsyncOlostep, Olostep_BaseError
         except ImportError:
@@ -447,6 +498,9 @@ class WebSearchTool(Tool):
             return f"Olostep search error: {type(e).__name__}: {e}"
 
     async def _search_brave(self, query: str, n: int) -> str:
+        """search brave。
+        
+        实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
         api_key = self.config.api_key or os.environ.get("BRAVE_API_KEY", "")
         if not api_key:
             logger.warning("BRAVE_API_KEY not set, falling back to DuckDuckGo")
@@ -487,6 +541,9 @@ class WebSearchTool(Tool):
             return f"Error: {e}"
 
     async def _search_tavily(self, query: str, n: int) -> str:
+        """search tavily。
+        
+        实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
         api_key = self.config.api_key or os.environ.get("TAVILY_API_KEY", "")
         if not api_key:
             logger.warning("TAVILY_API_KEY not set, falling back to DuckDuckGo")
@@ -505,6 +562,9 @@ class WebSearchTool(Tool):
             return f"Error: {e}"
 
     async def _search_searxng(self, query: str, n: int) -> str:
+        """search searxng。
+        
+        实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
         base_url = (self.config.base_url or os.environ.get("SEARXNG_BASE_URL", "")).strip()
         if not base_url:
             logger.warning("SEARXNG_BASE_URL not set, falling back to DuckDuckGo")
@@ -527,6 +587,9 @@ class WebSearchTool(Tool):
             return f"Error: {e}"
 
     async def _search_jina(self, query: str, n: int) -> str:
+        """search jina。
+        
+        实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
         api_key = self.config.api_key or os.environ.get("JINA_API_KEY", "")
         if not api_key:
             logger.warning("JINA_API_KEY not set, falling back to DuckDuckGo")
@@ -556,6 +619,9 @@ class WebSearchTool(Tool):
             return await self._search_duckduckgo(query, n)
 
     async def _search_kagi(self, query: str, n: int) -> str:
+        """search kagi。
+        
+        实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
         api_key = self.config.api_key or os.environ.get("KAGI_API_KEY", "")
         if not api_key:
             logger.warning("KAGI_API_KEY not set, falling back to DuckDuckGo")
@@ -578,6 +644,9 @@ class WebSearchTool(Tool):
             return f"Error: {e}"
 
     async def _search_exa(self, query: str, n: int) -> str:
+        """search exa。
+        
+        实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
         api_key = self.config.api_key or os.environ.get("EXA_API_KEY", "")
         if not api_key:
             logger.warning("EXA_API_KEY not set, falling back to DuckDuckGo")
@@ -636,6 +705,9 @@ class WebSearchTool(Tool):
         auth_level: int | None = None,
         query_rewrite: bool | None = None,
     ) -> str:
+        """search volcengine。
+        
+        实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
         api_key = (
             self.config.api_key
             or os.environ.get("VOLCENGINE_SEARCH_API_KEY", "")
@@ -731,6 +803,9 @@ class WebSearchTool(Tool):
         return _format_results(query, items, n)
 
     async def _search_duckduckgo(self, query: str, n: int) -> str:
+        """search duckduckgo。
+        
+        实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
         try:
             # 注意：duckduckgo_search 是同步库，而且会自己发请求；
             # 这里把它放进线程里执行，避免阻塞事件循环。
@@ -753,6 +828,9 @@ class WebSearchTool(Tool):
             return f"Error: DuckDuckGo search failed ({e})"
 
     async def _search_bocha(self, query: str, n: int, freshness: str = "noLimit") -> str:
+        """search bocha。
+        
+        实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
         api_key = self.config.api_key or os.environ.get("BOCHA_API_KEY", "")
         if not api_key:
             logger.warning("BOCHA_API_KEY not set, falling back to DuckDuckGo")
@@ -830,14 +908,23 @@ class WebFetchTool(Tool):
 
     @classmethod
     def config_cls(cls):
+        """config cls。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         return WebToolsConfig
 
     @classmethod
     def enabled(cls, ctx: Any) -> bool:
+        """enabled。
+        
+        实现方法：从输入值和当前配置中提取关键标志，按布尔条件组合判断，并把异常或空值按保守结果处理。"""
         return ctx.config.web.enable
 
     @classmethod
     def create(cls, ctx: Any) -> Tool:
+        """create。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         return cls(
             config=ctx.config.web.fetch,
             proxy=ctx.config.web.proxy,
@@ -845,6 +932,9 @@ class WebFetchTool(Tool):
         )
 
     def __init__(self, config: WebFetchConfig | None = None, proxy: str | None = None, user_agent: str | None = None, max_chars: int = 50000):
+        """init。
+        
+        初始化 WebFetchTool 实例。实现方法：把构造参数保存到实例字段，创建后续调用需要复用的缓存、状态容器或运行时依赖。"""
         self.config = config if config is not None else WebFetchConfig()
         self.proxy = proxy
         self.user_agent = user_agent or _DEFAULT_USER_AGENT
@@ -852,6 +942,9 @@ class WebFetchTool(Tool):
 
     @property
     def read_only(self) -> bool:
+        """read only。
+        
+        声明工具是否只读，供调度器判断并发和安全策略。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return True
 
     async def execute(
@@ -861,6 +954,9 @@ class WebFetchTool(Tool):
         max_chars: int | None = None,
         **kwargs: Any,
     ) -> Any:
+        """execute。
+        
+        实现方法：先校验参数和运行时上下文，再调用具体工具逻辑；异常会被包装成模型可继续修正的文本结果。"""
         url = url.strip(" \t\r\n`\"'")
         extract_mode = kwargs.pop("extractMode", extract_mode)
         max_chars = kwargs.pop("maxChars", max_chars) or self.max_chars
@@ -901,7 +997,9 @@ class WebFetchTool(Tool):
         return result
 
     async def _fetch_jina(self, url: str, max_chars: int) -> str | None:
-        """优先尝试通过 Jina Reader 抓取；失败时返回 ``None`` 让上层回退。"""
+        """优先尝试通过 Jina Reader 抓取；失败时返回 ``None`` 让上层回退。
+        
+        实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
         try:
             headers = {"Accept": "application/json", "User-Agent": self.user_agent}
             jina_key = os.environ.get("JINA_API_KEY", "")
@@ -937,7 +1035,9 @@ class WebFetchTool(Tool):
             return None
 
     async def _fetch_readability(self, url: str, extract_mode: str, max_chars: int) -> Any:
-        """本地回退方案：使用 readability-lxml 提取正文。"""
+        """本地回退方案：使用 readability-lxml 提取正文。
+        
+        实现方法：按安全路径解析目标，再读取内容并根据类型做截断、分页或格式转换。"""
         try:
             async with httpx.AsyncClient(
                 timeout=30.0,
@@ -988,6 +1088,9 @@ class WebFetchTool(Tool):
             return json.dumps({"error": str(e), "url": url}, ensure_ascii=False)
 
     def _extract_readable_html(self, html_content: str, extract_mode: str) -> str:
+        """extract readable html。
+        
+        实现方法：从对象、字典或响应块中按候选路径提取目标值，提取失败时返回空值而不是中断主流程。"""
         from readability import Document
 
         doc = Document(html_content)
@@ -996,7 +1099,9 @@ class WebFetchTool(Tool):
         return f"# {doc.title()}\n\n{content}" if doc.title() else content
 
     def _to_markdown(self, html_content: str) -> str:
-        """把简单 HTML 转成 Markdown 近似文本。"""
+        """把简单 HTML 转成 Markdown 近似文本。
+        
+        实现方法：把内部对象字段映射到目标格式，递归转换嵌套结构，并过滤目标协议不需要的空字段。"""
         text = re.sub(r'<a\s+[^>]*href=["\']([^"\']+)["\'][^>]*>([\s\S]*?)</a>',
                       lambda m: f'[{_strip_tags(m[2])}]({m[1]})', html_content, flags=re.I)
         text = re.sub(r'<h([1-6])[^>]*>([\s\S]*?)</h\1>',

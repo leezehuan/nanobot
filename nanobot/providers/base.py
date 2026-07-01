@@ -42,6 +42,8 @@ class ToolCallRequest:
         """序列化成 OpenAI 风格的 ``tool_call`` 字典。
 
         这样后续历史回放和跨 Provider 兼容会更简单，因为可以统一使用一种结构。
+
+        实现方法：把内部对象字段映射到目标格式，递归转换嵌套结构，并过滤目标协议不需要的空字段。
         """
         arguments = (
             self.arguments
@@ -74,6 +76,8 @@ def parse_tool_arguments(arguments: Any) -> Any:
     - 但畸形 JSON 或数组/标量，不在这里强行修复
 
     真正“能不能执行”要交给 ToolRegistry 校验，避免 Provider 层替执行层瞎猜。
+
+    实现方法：按响应或文本结构逐层读取字段，把缺失和异常格式归一化为 nanobot 内部对象。
     """
     if arguments is None:
         return {}
@@ -96,6 +100,8 @@ def tool_arguments_object_for_replay(arguments: Any) -> dict[str, Any]:
 
     注意这里和 ``parse_tool_arguments`` 不同：它允许对畸形 JSON 做兼容修复，
     因为它面对的是“旧历史重放协议兼容”，不是“即将执行的新工具调用”。
+
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。
     """
     if arguments is None:
         return {}
@@ -119,7 +125,9 @@ def tool_arguments_object_for_replay(arguments: Any) -> dict[str, Any]:
 
 
 def tool_arguments_json_for_replay(arguments: Any) -> str:
-    """仅用于历史回放：把参数转成 JSON 对象字符串。"""
+    """仅用于历史回放：把参数转成 JSON 对象字符串。
+    
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
     return json.dumps(tool_arguments_object_for_replay(arguments), ensure_ascii=False)
 
 
@@ -143,7 +151,9 @@ class LLMResponse:
 
     @property
     def has_tool_calls(self) -> bool:
-        """判断响应中是否包含工具调用。"""
+        """判断响应中是否包含工具调用。
+        
+        实现方法：从输入值和当前配置中提取关键标志，按布尔条件组合判断，并把异常或空值按保守结果处理。"""
         return len(self.tool_calls) > 0
 
     @property
@@ -153,6 +163,8 @@ class LLMResponse:
         不只是“有 tool_calls 就执行”，还要看 finish_reason 是否允许。
         例如某些网关会在 ``refusal`` / ``content_filter`` / ``error`` 情况下注入假工具调用，
         这里要显式挡掉。
+
+        实现方法：从输入值和当前配置中提取关键标志，按布尔条件组合判断，并把异常或空值按保守结果处理。
         """
         if not self.has_tool_calls:
             return False
@@ -255,6 +267,9 @@ class LLMProvider(ABC):
     _SENTINEL = object()
 
     def __init__(self, api_key: str | None = None, api_base: str | None = None):
+        """init。
+        
+        初始化 LLMProvider 实例。实现方法：把构造参数保存到实例字段，创建后续调用需要复用的缓存、状态容器或运行时依赖。"""
         self.api_key = api_key
         self.api_base = api_base
         self.generation: GenerationSettings = GenerationSettings()
@@ -266,6 +281,8 @@ class LLMProvider(ABC):
         主要修两类问题：
         - 空内容块 / 非法空 assistant 内容
         - 内部专用 ``_meta`` 字段
+
+        实现方法：先复制或规范化输入，再移除 provider 或工具无法接受的字段，并保留可安全回放的信息。
         """
         result: list[dict[str, Any]] = []
         for msg in messages:
@@ -315,7 +332,9 @@ class LLMProvider(ABC):
 
     @staticmethod
     def _tool_name(tool: dict[str, Any]) -> str:
-        """兼容不同 Provider 风格，从工具 schema 中提取工具名。"""
+        """兼容不同 Provider 风格，从工具 schema 中提取工具名。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         name = tool.get("name")
         if isinstance(name, str):
             return name
@@ -328,7 +347,9 @@ class LLMProvider(ABC):
 
     @classmethod
     def _tool_cache_marker_indices(cls, tools: list[dict[str, Any]]) -> list[int]:
-        """返回适合做 prompt cache 标记的工具列表边界索引。"""
+        """返回适合做 prompt cache 标记的工具列表边界索引。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         if not tools:
             return []
 
@@ -350,7 +371,9 @@ class LLMProvider(ABC):
         messages: list[dict[str, Any]],
         allowed_keys: frozenset[str],
     ) -> list[dict[str, Any]]:
-        """只保留对 Provider 安全的消息字段，并规范 assistant 内容。"""
+        """只保留对 Provider 安全的消息字段，并规范 assistant 内容。
+        
+        实现方法：先复制或规范化输入，再移除 provider 或工具无法接受的字段，并保留可安全回放的信息。"""
         sanitized = []
         for msg in messages:
             clean = {k: v for k, v in msg.items() if k in allowed_keys}
@@ -373,17 +396,24 @@ class LLMProvider(ABC):
         """发送一次非流式对话请求。
 
         这是所有具体 Provider 必须实现的核心接口。
+
+        实现方法：把统一请求参数转换为当前 provider 的 API 调用，并把返回值解析成 LLMResponse。
         """
         pass
 
     @classmethod
     def _is_transient_error(cls, content: str | None) -> bool:
+        """is transient error。
+        
+        实现方法：从输入值和当前配置中提取关键标志，按布尔条件组合判断，并把异常或空值按保守结果处理。"""
         err = (content or "").lower()
         return any(marker in err for marker in cls._TRANSIENT_ERROR_MARKERS)
 
     @classmethod
     def _is_transient_response(cls, response: LLMResponse) -> bool:
-        """判断某次错误是否属于“可重试的临时错误”。"""
+        """判断某次错误是否属于“可重试的临时错误”。
+        
+        实现方法：从输入值和当前配置中提取关键标志，按布尔条件组合判断，并把异常或空值按保守结果处理。"""
         if response.error_should_retry is not None:
             return bool(response.error_should_retry)
 
@@ -402,7 +432,9 @@ class LLMProvider(ABC):
 
     @classmethod
     def is_arrearage_response(cls, response: LLMResponse) -> bool:
-        """检测“欠费/配额耗尽/账单异常”这类重试也无意义的错误。"""
+        """检测“欠费/配额耗尽/账单异常”这类重试也无意义的错误。
+        
+        实现方法：从输入值和当前配置中提取关键标志，按布尔条件组合判断，并把异常或空值按保守结果处理。"""
         if response.error_status_code is not None and int(response.error_status_code) == 402:
             return True
 
@@ -420,6 +452,9 @@ class LLMProvider(ABC):
 
     @staticmethod
     def _normalize_error_token(value: Any) -> str | None:
+        """normalize error token。
+        
+        实现方法：把输入统一成内部约定格式，处理大小写、空值、别名或 provider 差异。"""
         if value is None:
             return None
         token = str(value).strip().lower()
@@ -427,6 +462,9 @@ class LLMProvider(ABC):
 
     @classmethod
     def _extract_error_type_code(cls, payload: Any) -> tuple[str | None, str | None]:
+        """extract error type code。
+        
+        实现方法：从对象、字典或响应块中按候选路径提取目标值，提取失败时返回空值而不是中断主流程。"""
         data: dict[str, Any] | None = None
         if isinstance(payload, dict):
             data = payload
@@ -453,7 +491,9 @@ class LLMProvider(ABC):
 
     @classmethod
     def _is_retryable_429_response(cls, response: LLMResponse) -> bool:
-        """细分 429：区分是真限流，还是余额/配额不足。"""
+        """细分 429：区分是真限流，还是余额/配额不足。
+        
+        实现方法：从输入值和当前配置中提取关键标志，按布尔条件组合判断，并把异常或空值按保守结果处理。"""
         type_token = cls._normalize_error_token(response.error_type)
         code_token = cls._normalize_error_token(response.error_code)
         semantic_tokens = {
@@ -483,6 +523,8 @@ class LLMProvider(ABC):
         - 连续两条非 system 消息角色相同
 
         所以这里会在真正请求前做一层协议修复。
+
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。
         """
         if not messages:
             return messages
@@ -542,7 +584,9 @@ class LLMProvider(ABC):
 
     @staticmethod
     def _strip_image_content(messages: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
-        """把图片块替换成文本占位，必要时用于错误恢复。"""
+        """把图片块替换成文本占位，必要时用于错误恢复。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         found = False
         result = []
         for msg in messages:
@@ -564,7 +608,9 @@ class LLMProvider(ABC):
 
     @staticmethod
     def _strip_image_content_inplace(messages: list[dict[str, Any]]) -> bool:
-        """原地把图片块替换成文本占位。"""
+        """原地把图片块替换成文本占位。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         found = False
         for msg in messages:
             content = msg.get("content")
@@ -578,7 +624,9 @@ class LLMProvider(ABC):
         return found
 
     async def _safe_chat(self, **kwargs: Any) -> LLMResponse:
-        """包装 ``chat()``：把异常转成标准 ``LLMResponse(error)``。"""
+        """包装 ``chat()``：把异常转成标准 ``LLMResponse(error)``。
+        
+        实现方法：把统一请求参数转换为当前 provider 的 API 调用，并把返回值解析成 LLMResponse。"""
         try:
             return await self.chat(**kwargs)
         except asyncio.CancelledError:
@@ -603,6 +651,8 @@ class LLMProvider(ABC):
 
         默认实现会退化成非流式 ``chat``，然后把整段内容一次性当作一个 delta 发出去。
         真正支持原生流式的 Provider 应该重写它。
+
+        实现方法：把普通聊天参数转换为流式请求，逐块消费增量文本、思考内容和工具调用，最后汇总成统一响应。
         """
         _ = on_thinking_delta, on_tool_call_delta
         response = await self.chat(
@@ -615,7 +665,9 @@ class LLMProvider(ABC):
         return response
 
     async def _safe_chat_stream(self, **kwargs: Any) -> LLMResponse:
-        """包装 ``chat_stream()``：把异常转成标准错误响应。"""
+        """包装 ``chat_stream()``：把异常转成标准错误响应。
+        
+        实现方法：把普通聊天参数转换为流式请求，逐块消费增量文本、思考内容和工具调用，最后汇总成统一响应。"""
         try:
             return await self.chat_stream(**kwargs)
         except asyncio.CancelledError:
@@ -639,7 +691,9 @@ class LLMProvider(ABC):
         retry_mode: str = "standard",
         on_retry_wait: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse:
-        """带重试地调用 ``chat_stream()``。"""
+        """带重试地调用 ``chat_stream()``。
+        
+        实现方法：把普通聊天参数转换为流式请求，逐块消费增量文本、思考内容和工具调用，最后汇总成统一响应。"""
         if max_tokens is self._SENTINEL or max_tokens is None:
             max_tokens = self.generation.max_tokens
         if temperature is self._SENTINEL or temperature is None:
@@ -650,6 +704,9 @@ class LLMProvider(ABC):
         has_streamed_content = False
 
         async def _tracking_delta(text: str) -> None:
+            """tracking delta。
+            
+            实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
             nonlocal has_streamed_content
             if text:
                 has_streamed_content = True
@@ -657,6 +714,9 @@ class LLMProvider(ABC):
                 await on_content_delta(text)
 
         async def _recover_stream() -> None:
+            """recover stream。
+            
+            实现方法：逐块读取上游事件，把文本增量、工具调用增量和完成信号分别转发给调用方。"""
             nonlocal has_streamed_content
             if on_stream_recover:
                 await on_stream_recover()
@@ -698,6 +758,8 @@ class LLMProvider(ABC):
 
         如果调用方没有显式传 ``max_tokens / temperature / reasoning_effort``，
         这里会自动使用 ``self.generation`` 中的默认值。
+
+        实现方法：把统一请求参数转换为当前 provider 的 API 调用，并把返回值解析成 LLMResponse。
         """
         if max_tokens is self._SENTINEL or max_tokens is None:
             max_tokens = self.generation.max_tokens
@@ -721,7 +783,9 @@ class LLMProvider(ABC):
 
     @classmethod
     def _extract_retry_after(cls, content: str | None) -> float | None:
-        """从错误文本里提取“建议重试等待时间”。"""
+        """从错误文本里提取“建议重试等待时间”。
+        
+        实现方法：从对象、字典或响应块中按候选路径提取目标值，提取失败时返回空值而不是中断主流程。"""
         text = (content or "").lower()
         patterns = (
             r"retry after\s+(\d+(?:\.\d+)?)\s*(ms|milliseconds|s|sec|secs|seconds|m|min|minutes)?",
@@ -740,6 +804,9 @@ class LLMProvider(ABC):
 
     @classmethod
     def _to_retry_seconds(cls, value: float, unit: str | None = None) -> float:
+        """to retry seconds。
+        
+        实现方法：把内部对象字段映射到目标格式，递归转换嵌套结构，并过滤目标协议不需要的空字段。"""
         normalized_unit = (unit or "s").lower()
         if normalized_unit in {"ms", "milliseconds"}:
             return max(0.1, value / 1000.0)
@@ -749,11 +816,16 @@ class LLMProvider(ABC):
 
     @classmethod
     def _extract_retry_after_from_headers(cls, headers: Any) -> float | None:
-        """从 HTTP 响应头中提取 retry-after。"""
+        """从 HTTP 响应头中提取 retry-after。
+        
+        实现方法：从对象、字典或响应块中按候选路径提取目标值，提取失败时返回空值而不是中断主流程。"""
         if not headers:
             return None
 
         def _header_value(name: str) -> Any:
+            """header value。
+            
+            实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
             if hasattr(headers, "get"):
                 value = headers.get(name) or headers.get(name.title())
                 if value is not None:
@@ -790,7 +862,9 @@ class LLMProvider(ABC):
 
     @classmethod
     def _extract_retry_after_from_response(cls, response: LLMResponse) -> float | None:
-        """统一从结构化字段或文本中提取 retry-after。"""
+        """统一从结构化字段或文本中提取 retry-after。
+        
+        实现方法：从对象、字典或响应块中按候选路径提取目标值，提取失败时返回空值而不是中断主流程。"""
         if response.error_retry_after_s is not None and response.error_retry_after_s > 0:
             return response.error_retry_after_s
         if response.retry_after is not None and response.retry_after > 0:
@@ -806,6 +880,9 @@ class LLMProvider(ABC):
         on_retry_wait: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         # 对长时间等待做分段 sleep，这样可以周期性向外报告“仍在重试等待中”。
+        """sleep with heartbeat。
+        
+        实现方法：把等待拆成小片段执行，片段之间发送心跳或检查取消状态。"""
         remaining = max(0.0, delay)
         while remaining > 0:
             if on_retry_wait:
@@ -872,6 +949,8 @@ class LLMProvider(ABC):
 
         【返回值】
         - LLMResponse: 最终响应（成功或失败）
+
+        实现方法：按回合状态机推进：准备上下文、请求模型、执行工具、保存结果，并在每个阶段同步进度事件。
         """
         attempt = 0
         delays = list(self._CHAT_RETRY_DELAYS)
@@ -981,5 +1060,7 @@ class LLMProvider(ABC):
 
     @abstractmethod
     def get_default_model(self) -> str:
-        """返回该 Provider 的默认模型名。"""
+        """返回该 Provider 的默认模型名。
+        
+        实现方法：优先从显式参数或实例状态读取目标值，缺失时回退到默认配置，并把结果整理成调用方期望的类型。"""
         pass

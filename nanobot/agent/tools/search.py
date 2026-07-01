@@ -48,10 +48,16 @@ _TYPE_GLOB_MAP = {
 
 
 def _normalize_pattern(pattern: str) -> str:
+    """normalize pattern。
+    
+    实现方法：把输入统一成内部约定格式，处理大小写、空值、别名或 provider 差异。"""
     return pattern.strip().replace("\\", "/")
 
 
 def _match_glob(rel_path: str, name: str, pattern: str) -> bool:
+    """match glob。
+    
+    实现方法：按精确、宽松或模式规则比较候选项，返回最可信的匹配结果。"""
     normalized = _normalize_pattern(pattern)
     if not normalized:
         return False
@@ -61,6 +67,9 @@ def _match_glob(rel_path: str, name: str, pattern: str) -> bool:
 
 
 def _is_binary(raw: bytes) -> bool:
+    """is binary。
+    
+    实现方法：从输入值和当前配置中提取关键标志，按布尔条件组合判断，并把异常或空值按保守结果处理。"""
     if b"\x00" in raw:
         return True
     sample = raw[:4096]
@@ -71,6 +80,9 @@ def _is_binary(raw: bytes) -> bool:
 
 
 def _paginate(items: list[T], limit: int | None, offset: int) -> tuple[list[T], bool]:
+    """paginate。
+    
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
     if limit is None:
         return items[offset:], False
     sliced = items[offset : offset + limit]
@@ -79,6 +91,9 @@ def _paginate(items: list[T], limit: int | None, offset: int) -> tuple[list[T], 
 
 
 def _pagination_note(limit: int | None, offset: int, truncated: bool) -> str | None:
+    """pagination note。
+    
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
     if truncated:
         if limit is None:
             return f"(pagination: offset={offset})"
@@ -89,6 +104,9 @@ def _pagination_note(limit: int | None, offset: int, truncated: bool) -> str | N
 
 
 def _matches_type(name: str, file_type: str | None) -> bool:
+    """matches type。
+    
+    实现方法：按精确、宽松或模式规则比较候选项，返回最可信的匹配结果。"""
     if not file_type:
         return True
     lowered = file_type.strip().lower()
@@ -99,6 +117,9 @@ def _matches_type(name: str, file_type: str | None) -> bool:
 
 
 def _matches_query(rel_path: str, query: str | None) -> bool:
+    """matches query。
+    
+    实现方法：按精确、宽松或模式规则比较候选项，返回最可信的匹配结果。"""
     if not query:
         return True
     haystack = rel_path.lower()
@@ -117,6 +138,9 @@ class _SearchTool(_FsTool):
     _IGNORE_DIRS = set(ListDirTool._IGNORE_DIRS)
 
     def _display_path(self, target: Path, root: Path) -> str:
+        """display path。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         workspace = self._display_workspace()
         if workspace:
             with suppress(ValueError):
@@ -124,6 +148,9 @@ class _SearchTool(_FsTool):
         return target.relative_to(root).as_posix()
 
     def _iter_files(self, root: Path) -> Iterable[Path]:
+        """iter files。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         if root.is_file():
             yield root
             return
@@ -141,10 +168,16 @@ class FindFilesTool(_SearchTool):
 
     @property
     def name(self) -> str:
+        """name。
+        
+        返回工具或 provider 对外暴露的稳定名称。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return "find_files"
 
     @property
     def description(self) -> str:
+        """description。
+        
+        返回给模型看的能力说明，帮助模型判断何时调用本工具。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return (
             "Find files by path fragment, glob, or file type. "
             "Use this before read_file when you need to locate files, and "
@@ -155,10 +188,16 @@ class FindFilesTool(_SearchTool):
 
     @property
     def read_only(self) -> bool:
+        """read only。
+        
+        声明工具是否只读，供调度器判断并发和安全策略。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return True
 
     @property
     def parameters(self) -> dict[str, Any]:
+        """parameters。
+        
+        返回本工具的参数 JSON Schema，供模型按结构生成调用参数。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return {
             "type": "object",
             "properties": {
@@ -206,6 +245,9 @@ class FindFilesTool(_SearchTool):
         }
 
     def _iter_paths(self, root: Path, *, include_dirs: bool) -> Iterable[Path]:
+        """iter paths。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         if root.is_file():
             yield root
             return
@@ -231,6 +273,9 @@ class FindFilesTool(_SearchTool):
         offset: int = 0,
         **kwargs: Any,
     ) -> str:
+        """execute。
+        
+        实现方法：先校验参数和运行时上下文，再调用具体工具逻辑；异常会被包装成模型可继续修正的文本结果。"""
         try:
             target = self._resolve(path or ".")
             if not target.exists():
@@ -301,10 +346,16 @@ class GrepTool(_SearchTool):
 
     @property
     def name(self) -> str:
+        """name。
+        
+        返回工具或 provider 对外暴露的稳定名称。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return "grep"
 
     @property
     def description(self) -> str:
+        """description。
+        
+        返回给模型看的能力说明，帮助模型判断何时调用本工具。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return (
             "Search file contents with a regex pattern. "
             "Default output_mode is files_with_matches (file paths only); "
@@ -315,10 +366,16 @@ class GrepTool(_SearchTool):
 
     @property
     def read_only(self) -> bool:
+        """read only。
+        
+        声明工具是否只读，供调度器判断并发和安全策略。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return True
 
     @property
     def parameters(self) -> dict[str, Any]:
+        """parameters。
+        
+        返回本工具的参数 JSON Schema，供模型按结构生成调用参数。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return {
             "type": "object",
             "properties": {
@@ -413,6 +470,9 @@ class GrepTool(_SearchTool):
         before: int,
         after: int,
     ) -> str:
+        """format block。
+        
+        实现方法：把结构化结果整理成用户或模型容易阅读的文本，必要时截断过长内容。"""
         start = max(1, match_line - before)
         end = min(len(lines), match_line + after)
         block = [f"{display_path}:{match_line}"]
@@ -438,6 +498,9 @@ class GrepTool(_SearchTool):
         offset: int = 0,
         **kwargs: Any,
     ) -> str:
+        """execute。
+        
+        实现方法：先校验参数和运行时上下文，再调用具体工具逻辑；异常会被包装成模型可继续修正的文本结果。"""
         try:
             target = self._resolve(path or ".")
             if not target.exists():

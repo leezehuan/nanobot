@@ -100,11 +100,16 @@ _MODEL_THINKING_STYLES: dict[str, str] = {
 
 
 def _model_slug(model_name: str) -> str:
+    """model slug。
+    
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
     return model_name.lower().rsplit("/", 1)[-1]
 
 
 def _requires_max_completion_tokens(model_name: str) -> bool:
-    """判断某些模型是否必须使用 ``max_completion_tokens`` 而不能用 ``max_tokens``。"""
+    """判断某些模型是否必须使用 ``max_completion_tokens`` 而不能用 ``max_tokens``。
+    
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
     slug = _model_slug(model_name)
     return "gpt-5" in slug or any(
         slug == p or slug.startswith((p + "-", p + ".")) for p in ("o1", "o3", "o4")
@@ -112,10 +117,16 @@ def _requires_max_completion_tokens(model_name: str) -> bool:
 
 
 def _model_thinking_style(model_name: str) -> str:
+    """model thinking style。
+    
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
     return _MODEL_THINKING_STYLES.get(_model_slug(model_name), "")
 
 
 def _thinking_styles_for(spec: ProviderSpec | None, model_name: str) -> list[str]:
+    """thinking styles for。
+    
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
     styles: list[str] = []
     if spec and spec.thinking_style:
         styles.append(spec.thinking_style)
@@ -126,11 +137,17 @@ def _thinking_styles_for(spec: ProviderSpec | None, model_name: str) -> list[str
 
 
 def _thinking_extra_body(style: str, thinking_enabled: bool) -> dict[str, Any] | None:
+    """thinking extra body。
+    
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
     builder = _THINKING_STYLE_MAP.get(style)
     return builder(thinking_enabled) if builder else None
 
 
 def _gateway_reasoning_extra_body(style: str, effort: str | None) -> dict[str, Any] | None:
+    """gateway reasoning extra body。
+    
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
     if not effort:
         return None
     builder = _GATEWAY_REASONING_STYLE_MAP.get(style)
@@ -138,11 +155,16 @@ def _gateway_reasoning_extra_body(style: str, effort: str | None) -> dict[str, A
 
 
 def _openai_compat_timeout_s() -> float:
-    """返回 OpenAI-compatible Provider 使用的统一请求超时。"""
+    """返回 OpenAI-compatible Provider 使用的统一请求超时。
+    
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
     return _float_env("NANOBOT_OPENAI_COMPAT_TIMEOUT_S", _OPENAI_COMPAT_REQUEST_TIMEOUT_S)
 
 
 def _float_env(name: str, default: float) -> float:
+    """float env。
+    
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
     raw = os.environ.get(name)
     if raw is None or not raw.strip():
         return default
@@ -158,19 +180,25 @@ def _float_env(name: str, default: float) -> float:
 
 
 def _short_tool_id() -> str:
-    """9-char alphanumeric ID compatible with all providers (incl. Mistral)."""
+    """9-char alphanumeric ID compatible with all providers (incl. Mistral).
+    
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
     return "".join(secrets.choice(_ALNUM) for _ in range(9))
 
 
 def _get(obj: Any, key: str) -> Any:
-    """同时兼容 dict / 对象属性两种读取方式。"""
+    """同时兼容 dict / 对象属性两种读取方式。
+    
+    实现方法：优先从显式参数或实例状态读取目标值，缺失时回退到默认配置，并把结果整理成调用方期望的类型。"""
     if isinstance(obj, dict):
         return obj.get(key)
     return getattr(obj, key, None)
 
 
 def _coerce_dict(value: Any) -> dict[str, Any] | None:
-    """尽量把任意对象转成 dict；失败或为空时返回 ``None``。"""
+    """尽量把任意对象转成 dict；失败或为空时返回 ``None``。
+    
+    实现方法：把字符串、JSON 或宽松类型尽量转换成 schema 期望的 Python 值。"""
     if value is None:
         return None
     if isinstance(value, dict):
@@ -197,6 +225,8 @@ def _extract_tc_extras(tc: Any) -> tuple[
     - ``function_provider_specific_fields``
 
     这样 nanobot 即使面对某些厂商的非标准字段，也能尽量无损保存下来。
+
+    实现方法：从对象、字典或响应块中按候选路径提取目标值，提取失败时返回空值而不是中断主流程。
     """
     extra_content = _coerce_dict(_get(tc, "extra_content"))
 
@@ -224,7 +254,9 @@ def _extract_tc_extras(tc: Any) -> tuple[
 
 
 def _uses_openrouter_attribution(spec: "ProviderSpec | None", api_base: str | None) -> bool:
-    """判断当前请求是否应该默认带上 OpenRouter attribution headers。"""
+    """判断当前请求是否应该默认带上 OpenRouter attribution headers。
+    
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
     if spec and spec.name == "openrouter":
         return True
     return bool(api_base and "openrouter" in api_base.lower())
@@ -238,7 +270,9 @@ def _is_local_endpoint(
     spec: "ProviderSpec | None",
     api_base: str | None,
 ) -> bool:
-    """判断当前 endpoint 是否是本地或局域网模型服务。"""
+    """判断当前 endpoint 是否是本地或局域网模型服务。
+    
+    实现方法：从输入值和当前配置中提取关键标志，按布尔条件组合判断，并把异常或空值按保守结果处理。"""
     if spec and spec.is_local:
         return True
     if not api_base:
@@ -261,7 +295,9 @@ def _is_local_endpoint(
 
 
 def _is_direct_openai_base(api_base: str | None) -> bool:
-    """判断 base URL 是否直连 OpenAI 官方，而不是某个兼容网关。"""
+    """判断 base URL 是否直连 OpenAI 官方，而不是某个兼容网关。
+    
+    实现方法：从输入值和当前配置中提取关键标志，按布尔条件组合判断，并把异常或空值按保守结果处理。"""
     if not api_base:
         return True
     normalized = api_base.strip().lower().rstrip("/")
@@ -273,13 +309,18 @@ def _responses_circuit_key(
     default_model: str,
     reasoning_effort: str | None,
 ) -> str:
+    """responses circuit key。
+    
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
     model_name = (model or default_model).lower()
     effort = reasoning_effort.lower() if isinstance(reasoning_effort, str) else ""
     return f"{model_name}:{effort}"
 
 
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    """递归合并两个 dict，返回新对象。"""
+    """递归合并两个 dict，返回新对象。
+    
+    实现方法：按顺序合并相邻或同类数据，并在冲突时保留更明确的新值。"""
     merged = dict(base)
     for key, value in override.items():
         if (
@@ -294,7 +335,9 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 
 
 def _merge_unique_list(base: Any, override: Any) -> Any:
-    """合并两个列表，保持顺序并去重。"""
+    """合并两个列表，保持顺序并去重。
+    
+    实现方法：按顺序合并相邻或同类数据，并在冲突时保留更明确的新值。"""
     if not isinstance(base, list) or not isinstance(override, list):
         return override
     result: list[Any] = []
@@ -315,7 +358,9 @@ def _merge_responses_extra_body(
     body: dict[str, Any],
     extra_body: dict[str, Any],
 ) -> dict[str, Any]:
-    """合并 Responses API 的 extra_body，同时尽量不破坏 tools/include 等关键字段。"""
+    """合并 Responses API 的 extra_body，同时尽量不破坏 tools/include 等关键字段。
+    
+    实现方法：按顺序合并相邻或同类数据，并在冲突时保留更明确的新值。"""
     reserved = {"include", "tools"}
     regular_extra = {key: value for key, value in extra_body.items() if key not in reserved}
     merged = _deep_merge(body, regular_extra)
@@ -376,6 +421,9 @@ class OpenAICompatProvider(LLMProvider):
         api_type: str = "auto",
         extra_query: dict[str, str] | None = None,
     ):
+        """init。
+        
+        初始化 OpenAICompatProvider 实例。实现方法：把构造参数保存到实例字段，创建后续调用需要复用的缓存、状态容器或运行时依赖。"""
         super().__init__(api_key, api_base)
         self.default_model = default_model
         self.extra_headers = extra_headers or {}
@@ -409,7 +457,9 @@ class OpenAICompatProvider(LLMProvider):
         self._responses_tripped_at: dict[str, float] = {}
 
     def _build_client(self) -> None:
-        """基于当前模块级 ``AsyncOpenAI`` 构建真实 client。"""
+        """基于当前模块级 ``AsyncOpenAI`` 构建真实 client。
+        
+        实现方法：从配置、上下文和运行时状态收集所需字段，再组装成后续组件可直接使用的数据结构。"""
         import httpx
 
         timeout_s = _openai_compat_timeout_s()
@@ -434,7 +484,9 @@ class OpenAICompatProvider(LLMProvider):
         )
 
     async def _ensure_client(self):
-        """返回共享 OpenAI client；若不存在则在首次调用时创建。"""
+        """返回共享 OpenAI client；若不存在则在首次调用时创建。
+        
+        实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
         if self._client is not None:
             return self._client
         async with self._client_lock:
@@ -457,7 +509,9 @@ class OpenAICompatProvider(LLMProvider):
             return self._client
 
     def _setup_env(self, api_key: str, api_base: str | None) -> None:
-        """按 ProviderSpec 约定补齐环境变量。"""
+        """按 ProviderSpec 约定补齐环境变量。
+        
+        实现方法：把新值写入实例状态，并同步更新依赖该状态的子组件或上下文变量。"""
         spec = self._spec
         if not spec or not spec.env_key:
             return
@@ -476,11 +530,16 @@ class OpenAICompatProvider(LLMProvider):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None]:
-        """为支持 prompt caching 的 provider 注入 ``cache_control`` 标记。"""
+        """为支持 prompt caching 的 provider 注入 ``cache_control`` 标记。
+        
+        实现方法：在输入对象的副本或当前运行时状态上逐项写入变更，再把相关缓存、子组件或事件同步更新。"""
         cache_marker = {"type": "ephemeral"}
         new_messages = list(messages)
 
         def _mark(msg: dict[str, Any]) -> dict[str, Any]:
+            """mark。
+            
+            实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
             content = msg.get("content")
             if isinstance(content, str):
                 return {**msg, "content": [
@@ -506,7 +565,9 @@ class OpenAICompatProvider(LLMProvider):
 
     @staticmethod
     def _normalize_tool_call_id(tool_call_id: Any) -> Any:
-        """把工具调用 ID 规范化为 provider 更容易接受的短字母数字形式。"""
+        """把工具调用 ID 规范化为 provider 更容易接受的短字母数字形式。
+        
+        实现方法：把输入统一成内部约定格式，处理大小写、空值、别名或 provider 差异。"""
         if not isinstance(tool_call_id, str):
             return tool_call_id
         if len(tool_call_id) == 9 and tool_call_id.isalnum():
@@ -514,12 +575,16 @@ class OpenAICompatProvider(LLMProvider):
         return hashlib.sha1(tool_call_id.encode()).hexdigest()[:9]
 
     def _should_normalize_tool_call_ids(self) -> bool:
-        """判断当前 provider 是否需要规范化工具调用 ID。"""
+        """判断当前 provider 是否需要规范化工具调用 ID。
+        
+        实现方法：从输入值和当前配置中提取关键标志，按布尔条件组合判断，并把异常或空值按保守结果处理。"""
         return bool(self._spec and self._spec.name == "mistral")
 
     @staticmethod
     def _coerce_content_to_string(content: Any) -> str | None:
-        """把 block/list 形式内容尽量压平成纯文本，供只接受字符串的 API 使用。"""
+        """把 block/list 形式内容尽量压平成纯文本，供只接受字符串的 API 使用。
+        
+        实现方法：把字符串、JSON 或宽松类型尽量转换成 schema 期望的 Python 值。"""
         if content is None or isinstance(content, str):
             return content
         text = OpenAICompatProvider._extract_text_content(content)
@@ -555,6 +620,8 @@ class OpenAICompatProvider(LLMProvider):
 
         【返回值】
         - list[dict] → 清洗后的消息列表，已通过 _enforce_role_alternation 校验
+
+        实现方法：先复制或规范化输入，再移除 provider 或工具无法接受的字段，并保留可安全回放的信息。
         """
         sanitized = LLMProvider._sanitize_request_messages(messages, _ALLOWED_MSG_KEYS)
         id_map: dict[str, str] = {}
@@ -563,6 +630,9 @@ class OpenAICompatProvider(LLMProvider):
         normalize_tool_ids = self._should_normalize_tool_call_ids()
 
         def map_id(value: Any) -> Any:
+            """map id。
+            
+            实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
             if not isinstance(value, str):
                 return value
             if not normalize_tool_ids:
@@ -570,6 +640,9 @@ class OpenAICompatProvider(LLMProvider):
             return id_map.setdefault(value, self._normalize_tool_call_id(value))
 
         def unique_tool_id(value: Any, used_ids: set[str], idx: int) -> str:
+            """unique tool id。
+            
+            实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
             if isinstance(value, str) and value:
                 base = map_id(value)
             else:
@@ -587,6 +660,9 @@ class OpenAICompatProvider(LLMProvider):
                 salt += 1
 
         def map_tool_result_id(value: Any) -> Any:
+            """map tool result id。
+            
+            实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
             if not isinstance(value, str):
                 return value
             queue = pending_tool_ids.get(value)
@@ -650,6 +726,8 @@ class OpenAICompatProvider(LLMProvider):
 
         GPT-5 family and reasoning models (o1/o3/o4) reject temperature
         when reasoning_effort is set to anything other than ``"none"``.
+
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。
         """
         if reasoning_effort and reasoning_effort.lower() != "none":
             return False
@@ -702,6 +780,8 @@ class OpenAICompatProvider(LLMProvider):
 
         【返回值】
         - dict → 可直接解包传给 client.chat.completions.create(**kwargs) 的参数字典
+
+        实现方法：从配置、上下文和运行时状态收集所需字段，再组装成后续组件可直接使用的数据结构。
         """
         model_name = model or self.default_model
         spec = self._spec
@@ -820,7 +900,9 @@ class OpenAICompatProvider(LLMProvider):
         model: str | None,
         reasoning_effort: str | None,
     ) -> bool:
-        """Use Responses API only for direct OpenAI requests that benefit from it."""
+        """Use Responses API only for direct OpenAI requests that benefit from it.
+        
+        实现方法：从输入值和当前配置中提取关键标志，按布尔条件组合判断，并把异常或空值按保守结果处理。"""
         if self._api_type == "chat_completions":
             return False
         if self._spec and self._spec.name not in ("openai", "github_copilot"):
@@ -849,7 +931,9 @@ class OpenAICompatProvider(LLMProvider):
         model: str | None,
         reasoning_effort: str | None,
     ) -> bool:
-        """Return False when the Responses API circuit breaker is open."""
+        """Return False when the Responses API circuit breaker is open.
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         key = _responses_circuit_key(model, self.default_model, reasoning_effort)
         failures = self._responses_failures.get(key, 0)
         if failures >= _RESPONSES_FAILURE_THRESHOLD:
@@ -860,6 +944,9 @@ class OpenAICompatProvider(LLMProvider):
         return True
 
     def _record_responses_failure(self, model: str | None, reasoning_effort: str | None) -> None:
+        """record responses failure。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         key = _responses_circuit_key(model, self.default_model, reasoning_effort)
         count = self._responses_failures.get(key, 0) + 1
         self._responses_failures[key] = count
@@ -871,13 +958,18 @@ class OpenAICompatProvider(LLMProvider):
             )
 
     def _record_responses_success(self, model: str | None, reasoning_effort: str | None) -> None:
+        """record responses success。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         key = _responses_circuit_key(model, self.default_model, reasoning_effort)
         self._responses_failures.pop(key, None)
         self._responses_tripped_at.pop(key, None)
 
     @staticmethod
     def _should_fallback_from_responses_error(e: Exception) -> bool:
-        """Fallback only for likely Responses API compatibility errors."""
+        """Fallback only for likely Responses API compatibility errors.
+        
+        实现方法：从输入值和当前配置中提取关键标志，按布尔条件组合判断，并把异常或空值按保守结果处理。"""
         response = getattr(e, "response", None)
         status_code = getattr(e, "status_code", None)
         if status_code is None and response is not None:
@@ -914,7 +1006,9 @@ class OpenAICompatProvider(LLMProvider):
         reasoning_effort: str | None,
         tool_choice: str | dict[str, Any] | None,
     ) -> dict[str, Any]:
-        """Build a Responses API body for direct OpenAI requests."""
+        """Build a Responses API body for direct OpenAI requests.
+        
+        实现方法：从配置、上下文和运行时状态收集所需字段，再组装成后续组件可直接使用的数据结构。"""
         model_name = model or self.default_model
         if self._spec and self._spec.strip_model_prefix:
             model_name = model_name.split("/")[-1]
@@ -953,6 +1047,9 @@ class OpenAICompatProvider(LLMProvider):
 
     @staticmethod
     def _maybe_mapping(value: Any) -> dict[str, Any] | None:
+        """maybe mapping。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         if isinstance(value, dict):
             return value
         model_dump = getattr(value, "model_dump", None)
@@ -964,6 +1061,9 @@ class OpenAICompatProvider(LLMProvider):
 
     @classmethod
     def _extract_text_content(cls, value: Any) -> str | None:
+        """extract text content。
+        
+        实现方法：从对象、字典或响应块中按候选路径提取目标值，提取失败时返回空值而不是中断主流程。"""
         if value is None:
             return None
         if isinstance(value, str):
@@ -993,6 +1093,8 @@ class OpenAICompatProvider(LLMProvider):
         Handles both dict-based (raw JSON) and object-based (SDK Pydantic)
         responses.  Provider-specific ``cached_tokens`` fields are normalised
         under a single key; see the priority chain inside for details.
+
+        实现方法：从对象、字典或响应块中按候选路径提取目标值，提取失败时返回空值而不是中断主流程。
         """
         # --- resolve usage object ---
         usage_obj = None
@@ -1041,6 +1143,8 @@ class OpenAICompatProvider(LLMProvider):
 
         Supports both dict-key access and attribute access so it works
         uniformly with raw JSON dicts **and** SDK Pydantic models.
+
+        实现方法：优先从显式参数或实例状态读取目标值，缺失时回退到默认配置，并把结果整理成调用方期望的类型。
         """
         current = obj
         for segment in path:
@@ -1078,6 +1182,8 @@ class OpenAICompatProvider(LLMProvider):
 
         【返回值】
         - LLMResponse → 统一格式的 LLM 响应结构体
+
+        实现方法：按响应或文本结构逐层读取字段，把缺失和异常格式归一化为 nanobot 内部对象。
         """
         if isinstance(response, str):
             return LLMResponse(content=response, finish_reason="stop")
@@ -1218,6 +1324,8 @@ class OpenAICompatProvider(LLMProvider):
 
         【返回值】
         - LLMResponse → 合并后的完整响应
+
+        实现方法：按响应或文本结构逐层读取字段，把缺失和异常格式归一化为 nanobot 内部对象。
         """
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
@@ -1226,7 +1334,9 @@ class OpenAICompatProvider(LLMProvider):
         usage: dict[str, int] = {}
 
         def _accum_tc(tc: Any, idx_hint: int) -> None:
-            """Accumulate one streaming tool-call delta into *tc_bufs*."""
+            """Accumulate one streaming tool-call delta into *tc_bufs*.
+            
+            实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
             tc_index: int = _get(tc, "index") if _get(tc, "index") is not None else idx_hint
             buf = tc_bufs.setdefault(tc_index, {
                 "id": "", "name": "", "arguments": "",
@@ -1252,7 +1362,9 @@ class OpenAICompatProvider(LLMProvider):
                 buf["fn_prov"] = fn_prov
 
         def _accum_legacy_function_call(function_call: Any) -> None:
-            """Accumulate legacy ``delta.function_call`` streaming chunks."""
+            """Accumulate legacy ``delta.function_call`` streaming chunks.
+            
+            实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
             if not function_call:
                 return
             buf = tc_bufs.setdefault(0, {
@@ -1349,6 +1461,9 @@ class OpenAICompatProvider(LLMProvider):
 
     @classmethod
     def _extract_error_metadata(cls, e: Exception) -> dict[str, Any]:
+        """extract error metadata。
+        
+        实现方法：从对象、字典或响应块中按候选路径提取目标值，提取失败时返回空值而不是中断主流程。"""
         response = getattr(e, "response", None)
         headers = getattr(response, "headers", None)
         payload = (
@@ -1402,6 +1517,9 @@ class OpenAICompatProvider(LLMProvider):
         spec: ProviderSpec | None = None,
         api_base: str | None = None,
     ) -> LLMResponse:
+        """handle error。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         body = (
             getattr(e, "doc", None)
             or getattr(e, "body", None)
@@ -1476,6 +1594,8 @@ class OpenAICompatProvider(LLMProvider):
 
         【返回值】
         - LLMResponse → 统一格式的 LLM 响应结构体
+
+        实现方法：把统一请求参数转换为当前 provider 的 API 调用，并把返回值解析成 LLMResponse。
         """
         await self._ensure_client()
         try:
@@ -1565,6 +1685,8 @@ class OpenAICompatProvider(LLMProvider):
 
         【返回值】
         - LLMResponse → 统一格式的 LLM 响应结构体
+
+        实现方法：把普通聊天参数转换为流式请求，逐块消费增量文本、思考内容和工具调用，最后汇总成统一响应。
         """
         await self._ensure_client()
         idle_timeout_s = int(os.environ.get("NANOBOT_STREAM_IDLE_TIMEOUT_S", "90"))
@@ -1579,6 +1701,9 @@ class OpenAICompatProvider(LLMProvider):
                     stream = await self._client.responses.create(**body)
 
                     async def _timed_stream():
+                        """timed stream。
+                        
+                        实现方法：逐块读取上游事件，把文本增量、工具调用增量和完成信号分别转发给调用方。"""
                         stream_iter = stream.__aiter__()
                         while True:
                             try:
@@ -1693,4 +1818,7 @@ class OpenAICompatProvider(LLMProvider):
             return self._handle_error(e, spec=self._spec, api_base=self.api_base)
 
     def get_default_model(self) -> str:
+        """get default model。
+        
+        实现方法：优先从显式参数或实例状态读取目标值，缺失时回退到默认配置，并把结果整理成调用方期望的类型。"""
         return self.default_model

@@ -19,6 +19,8 @@ def convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str
 
     - ``system_prompt``：从 ``system`` 消息中单独抽出
     - ``input_items``：Responses API 需要的 ``input`` 数组
+
+    实现方法：按目标协议逐项转换 role、content、tool call 等字段，并跳过或降级无法表达的结构。
     """
     system_prompt = ""
     input_items: list[dict[str, Any]] = []
@@ -79,6 +81,8 @@ def convert_user_message(content: Any) -> dict[str, Any]:
     - 纯字符串
     - ``text`` 块 -> ``input_text``
     - ``image_url`` 块 -> ``input_image``
+
+    实现方法：按目标协议逐项转换 role、content、tool call 等字段，并跳过或降级无法表达的结构。
     """
     if isinstance(content, str):
         return {"role": "user", "content": [{"type": "input_text", "text": content}]}
@@ -106,6 +110,8 @@ def convert_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     Responses API 更偏扁平：
     ``{"type": "function", "name": "...", "parameters": {...}}``
+
+    实现方法：按目标协议逐项转换 role、content、tool call 等字段，并跳过或降级无法表达的结构。
     """
     converted: list[dict[str, Any]] = []
     for tool in tools:
@@ -128,6 +134,8 @@ def _unique_item_id(item_id: str, used: set[str]) -> str:
 
     因为 assistant 文本、tool call、tool output 都会拆成多个 item，
     一旦 ID 冲突，上游就可能无法正确关联调用链。
+
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。
     """
     if item_id not in used:
         used.add(item_id)
@@ -145,6 +153,8 @@ def split_tool_call_id(tool_call_id: Any) -> tuple[str, str | None]:
     """拆分形如 ``call_id|item_id`` 的复合工具调用 ID。
 
     返回 ``(call_id, item_id)``，其中 ``item_id`` 可以为空。
+
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。
     """
     if isinstance(tool_call_id, str) and tool_call_id:
         if "|" in tool_call_id:

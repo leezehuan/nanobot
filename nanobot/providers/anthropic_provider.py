@@ -27,6 +27,9 @@ _ALNUM = string.ascii_letters + string.digits
 
 
 def _gen_tool_id() -> str:
+    """gen tool id。
+    
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
     return "toolu_" + "".join(secrets.choice(_ALNUM) for _ in range(22))
 
 
@@ -62,6 +65,9 @@ class AnthropicProvider(LLMProvider):
         default_model: str = "claude-sonnet-4-20250514",
         extra_headers: dict[str, str] | None = None,
     ):
+        """init。
+        
+        初始化 AnthropicProvider 实例。实现方法：把构造参数保存到实例字段，创建后续调用需要复用的缓存、状态容器或运行时依赖。"""
         super().__init__(api_key, api_base)
         self.default_model = default_model
         self.extra_headers = extra_headers or {}
@@ -81,7 +87,9 @@ class AnthropicProvider(LLMProvider):
 
     @staticmethod
     def _normalize_base_url(api_base: str) -> str:
-        """Anthropic SDK appends /v1 to request paths internally."""
+        """Anthropic SDK appends /v1 to request paths internally.
+        
+        实现方法：把输入统一成内部约定格式，处理大小写、空值、别名或 provider 差异。"""
         normalized = api_base.rstrip("/")
         if normalized.endswith("/v1"):
             return normalized[: -len("/v1")]
@@ -110,6 +118,8 @@ class AnthropicProvider(LLMProvider):
 
         【返回值】
         - LLMResponse → 包含错误信息的 LLM 响应，finish_reason="error"
+
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。
         """
         response = getattr(e, "response", None)
         headers = getattr(response, "headers", None)
@@ -167,6 +177,9 @@ class AnthropicProvider(LLMProvider):
 
     @staticmethod
     def _strip_prefix(model: str) -> str:
+        """strip prefix。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         if model.startswith("anthropic/"):
             return model[len("anthropic/"):]
         return model
@@ -201,6 +214,8 @@ class AnthropicProvider(LLMProvider):
         - (system, messages) 元组，可直接传入 Anthropic Messages API
         - system 可能是 str 或 list（启用缓存控制时包装成 list）
         - messages 是规范化后的 Anthropic 格式消息列表
+
+        实现方法：按目标协议逐项转换 role、content、tool call 等字段，并跳过或降级无法表达的结构。
         """
         system: str | list[dict[str, Any]] = ""
         raw: list[dict[str, Any]] = []
@@ -242,6 +257,9 @@ class AnthropicProvider(LLMProvider):
 
     @staticmethod
     def _tool_result_block(msg: dict[str, Any]) -> dict[str, Any]:
+        """tool result block。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         content = msg.get("content")
         block: dict[str, Any] = {
             "type": "tool_result",
@@ -257,6 +275,9 @@ class AnthropicProvider(LLMProvider):
 
     @staticmethod
     def _assistant_blocks(msg: dict[str, Any]) -> list[dict[str, Any]]:
+        """assistant blocks。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         blocks: list[dict[str, Any]] = []
         content = msg.get("content")
 
@@ -290,7 +311,9 @@ class AnthropicProvider(LLMProvider):
 
     @staticmethod
     def _convert_user_content(content: Any) -> Any:
-        """转换用户消息内容，并把 ``image_url`` 块改写成 Anthropic 图片块。"""
+        """转换用户消息内容，并把 ``image_url`` 块改写成 Anthropic 图片块。
+        
+        实现方法：按目标协议逐项转换 role、content、tool call 等字段，并跳过或降级无法表达的结构。"""
         if isinstance(content, str) or content is None:
             return content or "(empty)"
         if not isinstance(content, list):
@@ -317,7 +340,9 @@ class AnthropicProvider(LLMProvider):
 
     @staticmethod
     def _convert_image_block(block: dict[str, Any]) -> dict[str, Any] | None:
-        """把 OpenAI 风格 ``image_url`` block 转成 Anthropic 风格图片块。"""
+        """把 OpenAI 风格 ``image_url`` block 转成 Anthropic 风格图片块。
+        
+        实现方法：按目标协议逐项转换 role、content、tool call 等字段，并跳过或降级无法表达的结构。"""
         url = (block.get("image_url") or {}).get("url", "")
         if not url:
             return None
@@ -334,7 +359,9 @@ class AnthropicProvider(LLMProvider):
 
     @staticmethod
     def _has_tool_use(msg: dict[str, Any]) -> bool:
-        """判断消息里是否包含 ``tool_use`` block。"""
+        """判断消息里是否包含 ``tool_use`` block。
+        
+        实现方法：从输入值和当前配置中提取关键标志，按布尔条件组合判断，并把异常或空值按保守结果处理。"""
         content = msg.get("content")
         if not isinstance(content, list):
             return False
@@ -381,6 +408,8 @@ class AnthropicProvider(LLMProvider):
 
         此外，Anthropic 的 ``tool_use`` block 是放在 ``content`` 里的，
         不能像 OpenAI 那样简单地只看 ``tool_calls`` 字段。
+
+        实现方法：按顺序合并相邻或同类数据，并在冲突时保留更明确的新值。
         """
         merged: list[dict[str, Any]] = []
         for msg in msgs:
@@ -429,6 +458,9 @@ class AnthropicProvider(LLMProvider):
 
     @staticmethod
     def _convert_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
+        """convert tools。
+        
+        实现方法：按目标协议逐项转换 role、content、tool call 等字段，并跳过或降级无法表达的结构。"""
         if not tools:
             return None
         result = []
@@ -451,6 +483,9 @@ class AnthropicProvider(LLMProvider):
         tool_choice: str | dict[str, Any] | None,
         thinking_enabled: bool = False,
     ) -> dict[str, Any] | None:
+        """convert tool choice。
+        
+        实现方法：按目标协议逐项转换 role、content、tool call 等字段，并跳过或降级无法表达的结构。"""
         if thinking_enabled:
             return {"type": "auto"}
         if tool_choice is None or tool_choice == "auto":
@@ -476,6 +511,9 @@ class AnthropicProvider(LLMProvider):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None,
     ) -> tuple[str | list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]] | None]:
+        """apply cache control。
+        
+        实现方法：在输入对象的副本或当前运行时状态上逐项写入变更，再把相关缓存、子组件或事件同步更新。"""
         marker = {"type": "ephemeral"}
 
         if isinstance(system, str) and system:
@@ -546,6 +584,8 @@ class AnthropicProvider(LLMProvider):
 
         【返回值】
         - dict → 可直接解包传给 ``self._client.messages.create(**kwargs)`` 的参数字典
+
+        实现方法：从配置、上下文和运行时状态收集所需字段，再组装成后续组件可直接使用的数据结构。
         """
         model_name = self._strip_prefix(model or self.default_model)
         system, anthropic_msgs = self._convert_messages(self._sanitize_empty_content(messages))
@@ -630,6 +670,8 @@ class AnthropicProvider(LLMProvider):
 
         【返回值】
         - LLMResponse → 统一格式的 LLM 响应结构体，包含文本、工具调用、思考块和用量信息
+
+        实现方法：按响应或文本结构逐层读取字段，把缺失和异常格式归一化为 nanobot 内部对象。
         """
         content_parts: list[str] = []
         tool_calls: list[ToolCallRequest] = []
@@ -687,7 +729,9 @@ class AnthropicProvider(LLMProvider):
 
     @staticmethod
     def _is_streaming_required_error(e: Exception) -> bool:
-        """判断异常是否代表 Anthropic 要求本次调用必须改走流式模式。"""
+        """判断异常是否代表 Anthropic 要求本次调用必须改走流式模式。
+        
+        实现方法：从输入值和当前配置中提取关键标志，按布尔条件组合判断，并把异常或空值按保守结果处理。"""
         return isinstance(e, ValueError) and "streaming is required" in str(e).lower()
 
     async def chat(
@@ -724,6 +768,8 @@ class AnthropicProvider(LLMProvider):
 
         【返回值】
         - LLMResponse → 统一格式的 LLM 响应结构体
+
+        实现方法：把统一请求参数转换为当前 provider 的 API 调用，并把返回值解析成 LLMResponse。
         """
         kwargs = self._build_kwargs(
             messages, tools, model, max_tokens, temperature,
@@ -796,6 +842,8 @@ class AnthropicProvider(LLMProvider):
 
         【返回值】
         - LLMResponse → 统一格式的 LLM 响应结构体
+
+        实现方法：把普通聊天参数转换为流式请求，逐块消费增量文本、思考内容和工具调用，最后汇总成统一响应。
         """
         kwargs = self._build_kwargs(
             messages, tools, model, max_tokens, temperature,
@@ -877,4 +925,7 @@ class AnthropicProvider(LLMProvider):
             return self._handle_error(e)
 
     def get_default_model(self) -> str:
+        """get default model。
+        
+        实现方法：优先从显式参数或实例状态读取目标值，缺失时回退到默认配置，并把结果整理成调用方期望的类型。"""
         return self.default_model

@@ -87,6 +87,9 @@ class FallbackProvider(LLMProvider):
         fallback_presets: list[Any],
         provider_factory: Callable[[Any], LLMProvider],
     ):
+        """init。
+        
+        初始化 FallbackProvider 实例。实现方法：把构造参数保存到实例字段，创建后续调用需要复用的缓存、状态容器或运行时依赖。"""
         self._primary = primary
         self._fallback_presets = list(fallback_presets)
         self._provider_factory = provider_factory
@@ -96,23 +99,39 @@ class FallbackProvider(LLMProvider):
 
     @property
     def generation(self):
+        """generation。
+        
+        读写底层 provider 的生成参数对象，使 fallback 包装器和真实 provider 保持同一套配置。
+        实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return self._primary.generation
 
     @generation.setter
     def generation(self, value):
+        """generation。
+        
+        读写底层 provider 的生成参数对象，使 fallback 包装器和真实 provider 保持同一套配置。
+        实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         self._primary.generation = value
 
     def get_default_model(self) -> str:
+        """get default model。
+        
+        实现方法：优先从显式参数或实例状态读取目标值，缺失时回退到默认配置，并把结果整理成调用方期望的类型。"""
         return self._primary.get_default_model()
 
     @property
     def supports_progress_deltas(self) -> bool:
+        """supports progress deltas。
+        
+        实现方法：从输入值和当前配置中提取关键标志，按布尔条件组合判断，并把异常或空值按保守结果处理。"""
         return bool(getattr(self._primary, "supports_progress_deltas", False))
 
     def _primary_available(self) -> bool:
         """判断主 provider 当前是否允许再尝试。
 
         若已进入熔断状态，只有冷却时间过去后才允许进行一次“半开探测”。
+
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。
         """
         if self._primary_tripped_at is None:
             return True
@@ -122,6 +141,9 @@ class FallbackProvider(LLMProvider):
         return False
 
     async def chat(self, **kwargs: Any) -> LLMResponse:
+        """chat。
+        
+        实现方法：把统一请求参数转换为当前 provider 的 API 调用，并把返回值解析成 LLMResponse。"""
         if not self._has_fallbacks:
             return await self._primary.chat(**kwargs)
         return await self._try_with_fallback(
@@ -129,6 +151,9 @@ class FallbackProvider(LLMProvider):
         )
 
     async def chat_stream(self, **kwargs: Any) -> LLMResponse:
+        """chat stream。
+        
+        实现方法：把普通聊天参数转换为流式请求，逐块消费增量文本、思考内容和工具调用，最后汇总成统一响应。"""
         on_stream_recover = kwargs.pop("on_stream_recover", None)
         if not self._has_fallbacks:
             return await self._primary.chat_stream(**kwargs)
@@ -137,6 +162,9 @@ class FallbackProvider(LLMProvider):
         original_delta = kwargs.get("on_content_delta")
 
         async def _tracking_delta(text: str) -> None:
+            """tracking delta。
+            
+            实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
             if text:
                 has_streamed[0] = True
             if original_delta:
@@ -157,7 +185,9 @@ class FallbackProvider(LLMProvider):
         has_streamed: list[bool] | None,
         on_stream_recover: Callable[[], Awaitable[None]] | None = None,
     ) -> LLMResponse:
-        """先试主模型，必要时按顺序切换到 fallback 模型。"""
+        """先试主模型，必要时按顺序切换到 fallback 模型。
+        
+        实现方法：在主 provider 失败或返回可降级错误时，按预设顺序切换备用 provider 重试。"""
         primary_model = kwargs.get("model") or self._primary.get_default_model()
 
         if self._primary_available():
@@ -304,6 +334,8 @@ class FallbackProvider(LLMProvider):
         大致原则：
         - 权限、认证、内容过滤、请求参数错误：不降级
         - 超时、限流、连接错误、5xx、服务过载：允许降级
+
+        实现方法：从输入值和当前配置中提取关键标志，按布尔条件组合判断，并把异常或空值按保守结果处理。
         """
         if response.error_should_retry is False:
             return False

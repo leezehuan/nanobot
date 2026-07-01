@@ -26,12 +26,16 @@ FINISH_REASON_MAP = {
 
 
 def map_finish_reason(status: str | None) -> str:
-    """把 Responses API 状态映射成 Chat Completions 风格的 finish_reason。"""
+    """把 Responses API 状态映射成 Chat Completions 风格的 finish_reason。
+    
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
     return FINISH_REASON_MAP.get(status or "completed", "stop")
 
 
 def _usage_from_response_obj(response: Any) -> dict[str, int]:
-    """从 Responses 响应对象中抽取统一的 usage 统计。"""
+    """从 Responses 响应对象中抽取统一的 usage 统计。
+    
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
     usage_raw = response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
     if not usage_raw:
         return {}
@@ -51,7 +55,9 @@ def _usage_from_response_obj(response: Any) -> dict[str, int]:
 
 
 def _parse_tool_call_arguments(args_raw: Any, name: str | None) -> Any:
-    """解析工具参数；若解析失败则保留原值并记告警。"""
+    """解析工具参数；若解析失败则保留原值并记告警。
+    
+    实现方法：按响应或文本结构逐层读取字段，把缺失和异常格式归一化为 nanobot 内部对象。"""
     parsed = parse_tool_arguments(args_raw)
     if parsed == args_raw and isinstance(args_raw, str) and args_raw.strip():
         logger.warning(
@@ -63,7 +69,9 @@ def _parse_tool_call_arguments(args_raw: Any, name: str | None) -> Any:
 
 
 def _tool_arguments_source(*values: Any) -> Any:
-    """从多个候选值里挑出第一个真正有内容的参数来源。"""
+    """从多个候选值里挑出第一个真正有内容的参数来源。
+    
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
     for value in values:
         if value is None:
             continue
@@ -77,11 +85,15 @@ async def iter_sse(response: httpx.Response) -> AsyncGenerator[dict[str, Any], N
     """逐条解析并产出 Responses API SSE 流中的 JSON 事件。
 
     SSE 本质上是“按空行分隔的一段段文本事件”，这里负责把它刷成 JSON 对象。
+
+    实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。
     """
     buffer: list[str] = []
 
     def _flush() -> dict[str, Any] | None:
-        """把当前缓冲区中的一条 SSE 事件刷成 JSON。"""
+        """把当前缓冲区中的一条 SSE 事件刷成 JSON。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         data_lines = [line[5:].strip() for line in buffer if line.startswith("data:")]
         buffer.clear()
         if not data_lines:
@@ -119,6 +131,8 @@ async def consume_sse(
     """消费 SSE 流，并提取正文、工具调用和 finish_reason。
 
     这是不关心 reasoning 的轻量包装版本。
+
+    实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。
     """
     content, tool_calls, finish_reason, _, _ = await consume_sse_with_reasoning(
         response,
@@ -142,6 +156,8 @@ async def consume_sse_with_reasoning(
     - finish_reason
     - usage
     - reasoning_content
+
+    实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。
     """
     content = ""
     tool_calls: list[ToolCallRequest] = []
@@ -281,7 +297,9 @@ async def consume_sse_with_reasoning(
 
 
 def _extract_reasoning_summary_from_output(output: Any) -> str | None:
-    """从 Responses ``output`` 结构中提取 reasoning summary 文本。"""
+    """从 Responses ``output`` 结构中提取 reasoning summary 文本。
+    
+    实现方法：从对象、字典或响应块中按候选路径提取目标值，提取失败时返回空值而不是中断主流程。"""
     parts: list[str] = []
     for item in output or []:
         if not isinstance(item, dict):
@@ -299,7 +317,9 @@ def _extract_reasoning_summary_from_output(output: Any) -> str | None:
 
 
 def parse_response_output(response: Any) -> LLMResponse:
-    """把非流式 SDK ``Response`` 对象解析成统一 ``LLMResponse``。"""
+    """把非流式 SDK ``Response`` 对象解析成统一 ``LLMResponse``。
+    
+    实现方法：按响应或文本结构逐层读取字段，把缺失和异常格式归一化为 nanobot 内部对象。"""
     if not isinstance(response, dict):
         dump = getattr(response, "model_dump", None)
         response = dump() if callable(dump) else vars(response)
@@ -366,6 +386,8 @@ async def consume_sdk_stream(
 
     和 ``consume_sse_with_reasoning`` 类似，但这里面对的是 SDK 已解码好的事件对象，
     而不是原始 HTTP SSE 文本流。
+
+    实现方法：逐块读取上游事件，把文本增量、工具调用增量和完成信号分别转发给调用方。
     """
     content = ""
     tool_calls: list[ToolCallRequest] = []

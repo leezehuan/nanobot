@@ -74,7 +74,9 @@ class ProviderSpec:
 
     @property
     def label(self) -> str:
-        """返回更适合展示给用户的 Provider 名称。"""
+        """返回更适合展示给用户的 Provider 名称。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         return self.display_name or self.name.title()
 
 
@@ -530,7 +532,9 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
 
 
 def find_by_name(name: str) -> ProviderSpec | None:
-    """按配置字段名查找 ProviderSpec。"""
+    """按配置字段名查找 ProviderSpec。
+    
+    实现方法：遍历候选集合并应用过滤条件，返回符合条件的项或最接近的候选。"""
     normalized = to_snake(name.replace("-", "_"))
     for spec in PROVIDERS:
         if spec.name == normalized:

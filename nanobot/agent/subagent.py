@@ -58,11 +58,17 @@ class _SubagentHook(AgentHook):
     """子 Agent 运行时 Hook：记录工具调用并回写状态。"""
 
     def __init__(self, task_id: str, status: SubagentStatus | None = None) -> None:
+        """init。
+        
+        初始化 _SubagentHook 实例。实现方法：把构造参数保存到实例字段，创建后续调用需要复用的缓存、状态容器或运行时依赖。"""
         super().__init__()
         self._task_id = task_id
         self._status = status
 
     async def before_execute_tools(self, context: AgentHookContext) -> None:
+        """before execute tools。
+        
+        实现方法：先校验参数和运行时上下文，再调用具体工具逻辑；异常会被包装成模型可继续修正的文本结果。"""
         for tool_call in context.tool_calls:
             args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
             logger.debug(
@@ -71,6 +77,9 @@ class _SubagentHook(AgentHook):
             )
 
     async def after_iteration(self, context: AgentHookContext) -> None:
+        """after iteration。
+        
+        实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
         if self._status is None:
             return
         self._status.iteration = context.iteration
@@ -97,6 +106,9 @@ class SubagentManager:
         max_concurrent_subagents: int | None = None,
         llm_wall_timeout_for_session: Callable[[str | None], float | None] | None = None,
     ):
+        """init。
+        
+        初始化 SubagentManager 实例。实现方法：把构造参数保存到实例字段，创建后续调用需要复用的缓存、状态容器或运行时依赖。"""
         defaults = AgentDefaults()
         self.provider = provider
         self.workspace = workspace
@@ -123,7 +135,9 @@ class SubagentManager:
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
 
     def _subagent_tools_config(self) -> ToolsConfig:
-        """构造一份面向子 Agent 的精简工具配置。"""
+        """构造一份面向子 Agent 的精简工具配置。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         return ToolsConfig(
             exec=self.tools_config.exec,
             web=self.tools_config.web,
@@ -135,7 +149,9 @@ class SubagentManager:
         workspace: Path | None = None,
         tools_config: ToolsConfig | None = None,
     ) -> ToolRegistry:
-        """为子 Agent 构建隔离的工具注册表。"""
+        """为子 Agent 构建隔离的工具注册表。
+        
+        实现方法：从配置、上下文和运行时状态收集所需字段，再组装成后续组件可直接使用的数据结构。"""
         root = self.workspace if workspace is None else workspace
         registry = ToolRegistry()
         cfg = tools_config if tools_config is not None else self._subagent_tools_config()
@@ -152,6 +168,9 @@ class SubagentManager:
         return registry
 
     def set_provider(self, provider: LLMProvider, model: str) -> None:
+        """set provider。
+        
+        实现方法：把新值写入实例状态，并同步更新依赖该状态的子组件或上下文变量。"""
         self.provider = provider
         self.model = model
         self.runner.provider = provider
@@ -167,7 +186,9 @@ class SubagentManager:
         temperature: float | None = None,
         workspace_scope: WorkspaceScope | None = None,
     ) -> str:
-        """创建一个后台子 Agent，并立即返回“已开始”的确认文本。"""
+        """创建一个后台子 Agent，并立即返回“已开始”的确认文本。
+        
+        实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
         task_id = str(uuid.uuid4())[:8]
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
         # origin 记录这个子 Agent 从哪个会话/渠道派生而来，
@@ -199,7 +220,9 @@ class SubagentManager:
             self._session_tasks.setdefault(session_key, set()).add(task_id)
 
         def _cleanup(_: asyncio.Task) -> None:
-            """后台任务结束后，清理状态索引，避免残留僵尸记录。"""
+            """后台任务结束后，清理状态索引，避免残留僵尸记录。
+            
+            实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
             self._running_tasks.pop(task_id, None)
             self._task_statuses.pop(task_id, None)
             if session_key and (ids := self._session_tasks.get(session_key)):
@@ -223,11 +246,15 @@ class SubagentManager:
         temperature: float | None = None,
         workspace_scope: WorkspaceScope | None = None,
     ) -> None:
-        """真正运行子 Agent，并在结束后把结果公告回主会话。"""
+        """真正运行子 Agent，并在结束后把结果公告回主会话。
+        
+        实现方法：按回合状态机推进：准备上下文、请求模型、执行工具、保存结果，并在每个阶段同步进度事件。"""
         logger.info("Subagent [{}] starting task: {}", task_id, label)
 
         async def _on_checkpoint(payload: dict) -> None:
-            """接收 Runner 的阶段性进度回调，更新实时状态。"""
+            """接收 Runner 的阶段性进度回调，更新实时状态。
+            
+            实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
             status.phase = payload.get("phase", status.phase)
             status.iteration = payload.get("iteration", status.iteration)
 
@@ -310,7 +337,9 @@ class SubagentManager:
         status: str,
         origin_message_id: str | None = None,
     ) -> None:
-        """通过消息总线把子 Agent 结果重新注入主 Agent。"""
+        """通过消息总线把子 Agent 结果重新注入主 Agent。
+        
+        实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
         status_text = "completed successfully" if status == "ok" else "failed"
 
         announce_content = render_template(
@@ -344,7 +373,9 @@ class SubagentManager:
 
     @staticmethod
     def _format_partial_progress(result) -> str:
-        """把失败前的阶段性进展整理成可读文本。"""
+        """把失败前的阶段性进展整理成可读文本。
+        
+        实现方法：把结构化结果整理成用户或模型容易阅读的文本，必要时截断过长内容。"""
         completed = [e for e in result.tool_events if e["status"] == "ok"]
         failure = next((e for e in reversed(result.tool_events) if e["status"] == "error"), None)
         lines: list[str] = []
@@ -365,7 +396,9 @@ class SubagentManager:
         return "\n".join(lines) or (result.error or "Error: subagent execution failed.")
 
     def _build_subagent_prompt(self, workspace: Path | None = None) -> str:
-        """构建子 Agent 的聚焦版 system prompt。"""
+        """构建子 Agent 的聚焦版 system prompt。
+        
+        实现方法：从配置、上下文和运行时状态收集所需字段，再组装成后续组件可直接使用的数据结构。"""
         from nanobot.agent.context import ContextBuilder
         from nanobot.agent.skills import SkillsLoader
 
@@ -383,7 +416,9 @@ class SubagentManager:
         )
 
     async def cancel_by_session(self, session_key: str) -> int:
-        """取消某个会话名下的所有子 Agent，并返回取消数量。"""
+        """取消某个会话名下的所有子 Agent，并返回取消数量。
+        
+        实现方法：找到目标 session 或任务对应的 asyncio task，发出取消并等待清理结果。"""
         tasks = [self._running_tasks[tid] for tid in self._session_tasks.get(session_key, [])
                  if tid in self._running_tasks and not self._running_tasks[tid].done()]
         for t in tasks:
@@ -393,11 +428,15 @@ class SubagentManager:
         return len(tasks)
 
     def get_running_count(self) -> int:
-        """返回当前正在运行的子 Agent 数量。"""
+        """返回当前正在运行的子 Agent 数量。
+        
+        实现方法：优先从显式参数或实例状态读取目标值，缺失时回退到默认配置，并把结果整理成调用方期望的类型。"""
         return len(self._running_tasks)
 
     def get_running_count_by_session(self, session_key: str) -> int:
-        """返回某个会话当前仍在运行的子 Agent 数量。"""
+        """返回某个会话当前仍在运行的子 Agent 数量。
+        
+        实现方法：优先从显式参数或实例状态读取目标值，缺失时回退到默认配置，并把结果整理成调用方期望的类型。"""
         tids = self._session_tasks.get(session_key, set())
         return sum(
             1 for tid in tids

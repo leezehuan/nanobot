@@ -31,6 +31,8 @@ def session_extra(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
     """返回需要持久化到 session 的“回合附着能力”元数据。
 
     例如 CLI App 附件、MCP preset 等，都会把自己的附加信息通过这里统一收集。
+
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。
     """
     return cli_app_utils.session_extra(metadata) | mcp_tools.session_extra(metadata)
 
@@ -39,6 +41,8 @@ def runtime_lines(state: Any, msg: Any, workspace: Path, *, skip: bool = False) 
     """返回追加给模型可见的运行时注释行。
 
     这些内容会被塞进 Runtime Context 块里，让模型知道本回合临时挂载了哪些能力。
+
+    实现方法：按回合状态机推进：准备上下文、请求模型、执行工具、保存结果，并在每个阶段同步进度事件。
     """
     return [
         *cli_app_utils.runtime_lines(msg, workspace, skip=skip),
@@ -52,12 +56,16 @@ def runtime_lines(state: Any, msg: Any, workspace: Path, *, skip: bool = False) 
 
 
 async def connect_mcp(state: Any, tools: ToolRegistry) -> None:
-    """确保缺失的 MCP 服务器已连接。"""
+    """确保缺失的 MCP 服务器已连接。
+    
+    实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
     await mcp_tools.connect_missing_servers(state, tools)
 
 
 async def handle_runtime_control(state: Any, msg: InboundMessage, tools: ToolRegistry) -> bool:
-    """处理来自内部渠道的运行时控制消息，例如 MCP reload。"""
+    """处理来自内部渠道的运行时控制消息，例如 MCP reload。
+    
+    实现方法：按回合状态机推进：准备上下文、请求模型、执行工具、保存结果，并在每个阶段同步进度事件。"""
     return await mcp_tools.handle_runtime_control(state, msg, tools)
 
 
@@ -78,6 +86,9 @@ class ContextBuilder:
     _RUNTIME_CONTEXT_END = "[/Runtime Context]"
 
     def __init__(self, workspace: Path, timezone: str | None = None, disabled_skills: list[str] | None = None):
+        """init。
+        
+        初始化 ContextBuilder 实例。实现方法：把构造参数保存到实例字段，创建后续调用需要复用的缓存、状态容器或运行时依赖。"""
         self.workspace = workspace
         self.timezone = timezone
         self.memory = MemoryStore(workspace)
@@ -104,6 +115,8 @@ class ContextBuilder:
         - 技能目录摘要
         - 最近未处理的 memory history
         - 会话归档摘要
+
+        实现方法：从配置、上下文和运行时状态收集所需字段，再组装成后续组件可直接使用的数据结构。
         """
         root = workspace or self.workspace
         parts = [self._get_identity(channel=channel, workspace=root)]
@@ -151,6 +164,8 @@ class ContextBuilder:
         """生成系统身份部分。
 
         这里会把工作区路径、操作系统、Python 版本、渠道名等环境信息注入模板。
+
+        实现方法：优先从显式参数或实例状态读取目标值，缺失时回退到默认配置，并把结果整理成调用方期望的类型。
         """
         root = workspace or self.workspace
         workspace_path = str(root.expanduser().resolve())
@@ -177,6 +192,8 @@ class ContextBuilder:
 
         这一块是“给模型看的运行时说明”，但不是高优先级系统指令，
         所以会作为用户消息附加块追加，而不是直接写进 system prompt。
+
+        实现方法：从配置、上下文和运行时状态收集所需字段，再组装成后续组件可直接使用的数据结构。
         """
         lines = [f"Current Time: {current_time_str(timezone)}"]
         if channel and chat_id:
@@ -189,10 +206,16 @@ class ContextBuilder:
 
     @staticmethod
     def _merge_message_content(left: Any, right: Any) -> str | list[dict[str, Any]]:
+        """merge message content。
+        
+        实现方法：按顺序合并相邻或同类数据，并在冲突时保留更明确的新值。"""
         if isinstance(left, str) and isinstance(right, str):
             return f"{left}\n\n{right}" if left else right
 
         def _to_blocks(value: Any) -> list[dict[str, Any]]:
+            """to blocks。
+            
+            实现方法：把内部对象字段映射到目标格式，递归转换嵌套结构，并过滤目标协议不需要的空字段。"""
             if isinstance(value, list):
                 return [item if isinstance(item, dict) else {"type": "text", "text": str(item)} for item in value]
             if value is None:
@@ -202,7 +225,9 @@ class ContextBuilder:
         return _to_blocks(left) + _to_blocks(right)
 
     def _load_bootstrap_files(self, workspace: Path | None = None) -> str:
-        """从工作区加载 bootstrap 文件内容。"""
+        """从工作区加载 bootstrap 文件内容。
+        
+        实现方法：从配置、内置目录或入口点发现候选项，过滤不可用项后注册到运行时。"""
         parts = []
         root = workspace or self.workspace
 
@@ -216,7 +241,9 @@ class ContextBuilder:
 
     @staticmethod
     def _is_template_content(content: str, template_path: str) -> bool:
-        """判断某段内容是否仍然和内置模板完全一致。"""
+        """判断某段内容是否仍然和内置模板完全一致。
+        
+        实现方法：从输入值和当前配置中提取关键标志，按布尔条件组合判断，并把异常或空值按保守结果处理。"""
         tpl = load_bundled_template(template_path)
         if tpl is not None:
             return content.strip() == tpl.strip()
@@ -288,6 +315,8 @@ class ContextBuilder:
 
         【返回值】
         - list[dict]: 完整的 messages 列表，可直接传给 LLMProvider.chat()
+
+        实现方法：从配置、上下文和运行时状态收集所需字段，再组装成后续组件可直接使用的数据结构。
         """
         root = workspace or self.workspace
         extra = [
@@ -338,7 +367,9 @@ class ContextBuilder:
         return messages
 
     def _build_user_content(self, text: str, media: list[str] | None) -> str | list[dict[str, Any]]:
-        """构建用户消息内容，并在需要时把本地图片转成 base64 内联块。"""
+        """构建用户消息内容，并在需要时把本地图片转成 base64 内联块。
+        
+        实现方法：从配置、上下文和运行时状态收集所需字段，再组装成后续组件可直接使用的数据结构。"""
         if not media:
             return text
 

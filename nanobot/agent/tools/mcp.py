@@ -56,17 +56,23 @@ _ReconnectCallback = Callable[[str, str, Tool], Awaitable[Tool | None]]
 
 
 def _sanitize_name(name: str) -> str:
-    """把 MCP 派生名称清洗成模型 API 可接受的工具名。"""
+    """把 MCP 派生名称清洗成模型 API 可接受的工具名。
+    
+    实现方法：先复制或规范化输入，再移除 provider 或工具无法接受的字段，并保留可安全回放的信息。"""
     return _SANITIZE_RE.sub("_", re.sub(r"[^a-zA-Z0-9_-]", "_", name))
 
 
 def _is_transient(exc: BaseException) -> bool:
-    """判断异常是否像“可重试的瞬时连接错误”。"""
+    """判断异常是否像“可重试的瞬时连接错误”。
+    
+    实现方法：从输入值和当前配置中提取关键标志，按布尔条件组合判断，并把异常或空值按保守结果处理。"""
     return type(exc).__name__ in _TRANSIENT_EXC_NAMES
 
 
 def _is_session_terminated(exc: BaseException) -> bool:
-    """判断异常是否意味着 MCP client session 已经失效。"""
+    """判断异常是否意味着 MCP client session 已经失效。
+    
+    实现方法：从输入值和当前配置中提取关键标志，按布尔条件组合判断，并把异常或空值按保守结果处理。"""
     messages = [str(exc)]
     error = getattr(exc, "error", None)
     if error is not None:
@@ -83,6 +89,8 @@ async def _probe_http_url(url: str, timeout: float = 3.0) -> bool:
 
     这样可以避免在端口根本没开时直接进入更重的 transport 初始化流程，
     减少 anyio 清理异常把错误抛到事件循环外的风险。
+
+    实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。
     """
     parsed = urllib.parse.urlparse(url)
     host = parsed.hostname or "127.0.0.1"
@@ -103,7 +111,9 @@ async def _probe_http_url(url: str, timeout: float = 3.0) -> bool:
 
 
 async def _validate_mcp_request_url(request: httpx.Request) -> None:
-    """校验每一个发往 MCP HTTP 服务的请求 URL。"""
+    """校验每一个发往 MCP HTTP 服务的请求 URL。
+    
+    实现方法：先做格式与安全边界检查，再把失败原因转换成调用方可读的错误信息。"""
     ok, error = validate_url_target(str(request.url))
     if not ok:
         raise httpx.RequestError(
@@ -113,7 +123,9 @@ async def _validate_mcp_request_url(request: httpx.Request) -> None:
 
 
 def _windows_command_basename(command: str) -> str:
-    """提取 Windows 命令/路径的 basename，并转成小写。"""
+    """提取 Windows 命令/路径的 basename，并转成小写。
+    
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
     return command.replace("\\", "/").rsplit("/", maxsplit=1)[-1].lower()
 
 
@@ -122,7 +134,9 @@ def _normalize_windows_stdio_command(
     args: list[str] | None,
     env: dict[str, str] | None,
 ) -> tuple[str, list[str], dict[str, str] | None]:
-    """在 Windows 上包装某些 shell 启动器，保证 stdio 型 MCP server 稳定启动。"""
+    """在 Windows 上包装某些 shell 启动器，保证 stdio 型 MCP server 稳定启动。
+    
+    实现方法：把输入统一成内部约定格式，处理大小写、空值、别名或 provider 差异。"""
     normalized_args = list(args or [])
     if os.name != "nt":
         return command, normalized_args, env
@@ -149,7 +163,9 @@ def _normalize_windows_stdio_command(
 
 
 def _extract_nullable_branch(options: Any) -> tuple[dict[str, Any], bool] | None:
-    """从可空联合类型里提取唯一的“非 null 分支”。"""
+    """从可空联合类型里提取唯一的“非 null 分支”。
+    
+    实现方法：从对象、字典或响应块中按候选路径提取目标值，提取失败时返回空值而不是中断主流程。"""
     if not isinstance(options, list):
         return None
 
@@ -169,7 +185,9 @@ def _extract_nullable_branch(options: Any) -> tuple[dict[str, Any], bool] | None
 
 
 def _normalize_schema_for_openai(schema: Any) -> dict[str, Any]:
-    """把 MCP schema 规范化成更适合 OpenAI 工具定义的形式。"""
+    """把 MCP schema 规范化成更适合 OpenAI 工具定义的形式。
+    
+    实现方法：把输入统一成内部约定格式，处理大小写、空值、别名或 provider 差异。"""
     if not isinstance(schema, dict):
         return {"type": "object", "properties": {}}
 
@@ -219,11 +237,17 @@ class _MCPWrapperBase(Tool):
     _plugin_discoverable = False
 
     def _set_mcp_connection(self, session: Any, server_name: str) -> None:
+        """set mcp connection。
+        
+        实现方法：把新值写入实例状态，并同步更新依赖该状态的子组件或上下文变量。"""
         self._session = session
         self._server_name = server_name
         self._reconnect: _ReconnectCallback | None = None
 
     def set_reconnect_handler(self, reconnect: _ReconnectCallback) -> None:
+        """set reconnect handler。
+        
+        实现方法：把新值写入实例状态，并同步更新依赖该状态的子组件或上下文变量。"""
         self._reconnect = reconnect
 
     async def _refresh_session_after_termination(
@@ -232,6 +256,9 @@ class _MCPWrapperBase(Tool):
         already_refreshed: bool,
         capability_kind: str,
     ) -> bool:
+        """refresh session after termination。
+        
+        实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
         if already_refreshed or not _is_session_terminated(exc) or self._reconnect is None:
             return False
         logger.warning(
@@ -260,6 +287,9 @@ class MCPToolWrapper(_MCPWrapperBase):
     _plugin_discoverable = False
 
     def __init__(self, session, server_name: str, tool_def, tool_timeout: int = 30):
+        """init。
+        
+        初始化 MCPToolWrapper 实例。实现方法：把构造参数保存到实例字段，创建后续调用需要复用的缓存、状态容器或运行时依赖。"""
         self._set_mcp_connection(session, server_name)
         self._original_name = tool_def.name
         self._name = _sanitize_name(f"mcp_{server_name}_{tool_def.name}")
@@ -270,17 +300,29 @@ class MCPToolWrapper(_MCPWrapperBase):
 
     @property
     def name(self) -> str:
+        """name。
+        
+        返回工具或 provider 对外暴露的稳定名称。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return self._name
 
     @property
     def description(self) -> str:
+        """description。
+        
+        返回给模型看的能力说明，帮助模型判断何时调用本工具。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return self._description
 
     @property
     def parameters(self) -> dict[str, Any]:
+        """parameters。
+        
+        返回本工具的参数 JSON Schema，供模型按结构生成调用参数。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return self._parameters
 
     async def execute(self, **kwargs: Any) -> str:
+        """execute。
+        
+        实现方法：先校验参数和运行时上下文，再调用具体工具逻辑；异常会被包装成模型可继续修正的文本结果。"""
         from mcp import types
 
         retried_transient = False
@@ -355,6 +397,9 @@ class MCPResourceWrapper(_MCPWrapperBase):
     _plugin_discoverable = False
 
     def __init__(self, session, server_name: str, resource_def, resource_timeout: int = 30):
+        """init。
+        
+        初始化 MCPResourceWrapper 实例。实现方法：把构造参数保存到实例字段，创建后续调用需要复用的缓存、状态容器或运行时依赖。"""
         self._set_mcp_connection(session, server_name)
         self._uri = resource_def.uri
         self._name = _sanitize_name(f"mcp_{server_name}_resource_{resource_def.name}")
@@ -369,21 +414,36 @@ class MCPResourceWrapper(_MCPWrapperBase):
 
     @property
     def name(self) -> str:
+        """name。
+        
+        返回工具或 provider 对外暴露的稳定名称。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return self._name
 
     @property
     def description(self) -> str:
+        """description。
+        
+        返回给模型看的能力说明，帮助模型判断何时调用本工具。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return self._description
 
     @property
     def parameters(self) -> dict[str, Any]:
+        """parameters。
+        
+        返回本工具的参数 JSON Schema，供模型按结构生成调用参数。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return self._parameters
 
     @property
     def read_only(self) -> bool:
+        """read only。
+        
+        声明工具是否只读，供调度器判断并发和安全策略。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return True
 
     async def execute(self, **kwargs: Any) -> str:
+        """execute。
+        
+        实现方法：先校验参数和运行时上下文，再调用具体工具逻辑；异常会被包装成模型可继续修正的文本结果。"""
         from mcp import types
 
         retried_transient = False
@@ -456,6 +516,9 @@ class MCPPromptWrapper(_MCPWrapperBase):
     _plugin_discoverable = False
 
     def __init__(self, session, server_name: str, prompt_def, prompt_timeout: int = 30):
+        """init。
+        
+        初始化 MCPPromptWrapper 实例。实现方法：把构造参数保存到实例字段，创建后续调用需要复用的缓存、状态容器或运行时依赖。"""
         self._set_mcp_connection(session, server_name)
         self._prompt_name = prompt_def.name
         self._name = _sanitize_name(f"mcp_{server_name}_prompt_{prompt_def.name}")
@@ -485,21 +548,36 @@ class MCPPromptWrapper(_MCPWrapperBase):
 
     @property
     def name(self) -> str:
+        """name。
+        
+        返回工具或 provider 对外暴露的稳定名称。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return self._name
 
     @property
     def description(self) -> str:
+        """description。
+        
+        返回给模型看的能力说明，帮助模型判断何时调用本工具。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return self._description
 
     @property
     def parameters(self) -> dict[str, Any]:
+        """parameters。
+        
+        返回本工具的参数 JSON Schema，供模型按结构生成调用参数。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return self._parameters
 
     @property
     def read_only(self) -> bool:
+        """read only。
+        
+        声明工具是否只读，供调度器判断并发和安全策略。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return True
 
     async def execute(self, **kwargs: Any) -> str:
+        """execute。
+        
+        实现方法：先校验参数和运行时上下文，再调用具体工具逻辑；异常会被包装成模型可继续修正的文本结果。"""
         from mcp import types
         from mcp.shared.exceptions import McpError
 
@@ -594,6 +672,8 @@ async def connect_mcp_servers(
 
     返回 ``server_name -> AsyncExitStack`` 的映射。
     每个 server 独占一个 exit stack，避免多个 MCP 连接共享同一清理栈时互相影响。
+
+    实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。
     """
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.sse import sse_client
@@ -601,6 +681,9 @@ async def connect_mcp_servers(
     from mcp.client.streamable_http import streamable_http_client
 
     async def connect_single_server(name: str, cfg) -> tuple[str, AsyncExitStack | None]:
+        """connect single server。
+        
+        实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
         server_stack = AsyncExitStack()
         await server_stack.__aenter__()
 
@@ -654,6 +737,9 @@ async def connect_mcp_servers(
                     timeout: httpx.Timeout | None = None,
                     auth: httpx.Auth | None = None,
                 ) -> httpx.AsyncClient:
+                    """httpx client factory。
+                    
+                    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
                     merged_headers = {
                         "Accept": "application/json, text/event-stream",
                         **(cfg.headers or {}),
@@ -805,7 +891,9 @@ async def connect_mcp_servers(
 
 
 def session_extra(metadata: Mapping[str, Any] | None) -> dict[str, Any]:
-    """提取需要随 session 持久化保存的 MCP preset 附加信息。"""
+    """提取需要随 session 持久化保存的 MCP preset 附加信息。
+    
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
     mcp_presets = metadata.get("mcp_presets") if isinstance(metadata, Mapping) else None
     return {"mcp_presets": mcp_presets} if isinstance(mcp_presets, list) and mcp_presets else {}
 
@@ -818,7 +906,9 @@ def runtime_lines(
     connected_server_names: set[str] | None = None,
     skip: bool = False,
 ) -> list[str]:
-    """生成当前 turn 暴露给模型看的 MCP preset 注释文本。"""
+    """生成当前 turn 暴露给模型看的 MCP preset 注释文本。
+    
+    实现方法：按回合状态机推进：准备上下文、请求模型、执行工具、保存结果，并在每个阶段同步进度事件。"""
     if skip:
         return []
     if configured_server_names is None:
@@ -868,7 +958,9 @@ def runtime_lines(
 
 
 async def connect_missing_servers(state: Any, registry: ToolRegistry) -> None:
-    """把已配置但当前未连上的 MCP server 补连上。"""
+    """把已配置但当前未连上的 MCP server 补连上。
+    
+    实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
     missing_servers = {
         name: cfg for name, cfg in state._mcp_servers.items() if name not in state._mcp_stacks
     }
@@ -895,7 +987,9 @@ async def connect_missing_servers(state: Any, registry: ToolRegistry) -> None:
 
 
 async def reload_servers(state: Any, registry: ToolRegistry) -> dict[str, Any]:
-    """根据最新配置文件，对在线 MCP 连接做热重载对账。"""
+    """根据最新配置文件，对在线 MCP 连接做热重载对账。
+    
+    实现方法：从配置、内置目录或入口点发现候选项，过滤不可用项后注册到运行时。"""
     async with _reload_lock(state):
         try:
             from nanobot.config.loader import load_config, resolve_config_env_vars
@@ -980,7 +1074,9 @@ async def reload_servers(state: Any, registry: ToolRegistry) -> dict[str, Any]:
 
 
 async def request_mcp_reload(bus: Any, *, timeout: float = 15.0) -> dict[str, Any]:
-    """请求运行中的 AgentLoop 重新对账 MCP 连接。"""
+    """请求运行中的 AgentLoop 重新对账 MCP 连接。
+    
+    实现方法：从配置、内置目录或入口点发现候选项，过滤不可用项后注册到运行时。"""
     loop = asyncio.get_running_loop()
     ack: asyncio.Future[dict[str, Any]] = loop.create_future()
     await bus.publish_inbound(
@@ -1011,6 +1107,9 @@ async def request_mcp_reload(bus: Any, *, timeout: float = 15.0) -> dict[str, An
 
 
 async def handle_runtime_control(state: Any, msg: InboundMessage, registry: ToolRegistry) -> bool:
+    """handle runtime control。
+    
+    实现方法：按回合状态机推进：准备上下文、请求模型、执行工具、保存结果，并在每个阶段同步进度事件。"""
     metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
     control = metadata.get(INBOUND_META_RUNTIME_CONTROL)
     if control != RUNTIME_CONTROL_MCP_RELOAD:
@@ -1033,6 +1132,9 @@ async def handle_runtime_control(state: Any, msg: InboundMessage, registry: Tool
 
 
 def _reload_lock(state: Any) -> asyncio.Lock:
+    """reload lock。
+    
+    实现方法：从配置、内置目录或入口点发现候选项，过滤不可用项后注册到运行时。"""
     try:
         return _RELOAD_LOCKS[state]
     except KeyError:
@@ -1046,7 +1148,13 @@ def _attach_reconnect_handlers(
     registry: ToolRegistry,
     server_names: Mapping[str, Any] | set[str] | list[str] | tuple[str, ...],
 ) -> None:
+    """attach reconnect handlers。
+    
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
     async def reconnect(server_name: str, tool_name: str, stale_tool: Tool) -> Tool | None:
+        """reconnect。
+        
+        实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
         return await _refresh_terminated_server(
             state,
             registry,
@@ -1072,6 +1180,9 @@ async def _refresh_terminated_server(
     tool_name: str,
     stale_tool: Tool,
 ) -> Tool | None:
+    """refresh terminated server。
+    
+    实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
     async with _reload_lock(state):
         cfg = state._mcp_servers.get(server_name)
         if cfg is None:
@@ -1104,16 +1215,25 @@ async def _refresh_terminated_server(
 
 
 def _server_signature(cfg: Any) -> Any:
+    """server signature。
+    
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
     if hasattr(cfg, "model_dump"):
         return cfg.model_dump(mode="json")
     return cfg
 
 
 def _tool_prefix(server_name: str) -> str:
+    """tool prefix。
+    
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
     return _sanitize_name(f"mcp_{server_name}_")
 
 
 def _unregister_server_tools(state: Any, registry: ToolRegistry, server_name: str) -> int:
+    """unregister server tools。
+    
+    实现方法：把对象写入内部映射表，并清理依赖该映射生成的缓存。"""
     prefix = _tool_prefix(server_name)
     removed = 0
     for tool_name in list(registry.tool_names):
@@ -1124,6 +1244,9 @@ def _unregister_server_tools(state: Any, registry: ToolRegistry, server_name: st
 
 
 async def _close_server(state: Any, server_name: str) -> None:
+    """close server。
+    
+    实现方法：按已登记的异步清理栈释放连接、会话或后台资源，并重置连接状态。"""
     stack = state._mcp_stacks.pop(server_name, None)
     if stack is None:
         return

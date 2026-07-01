@@ -65,6 +65,9 @@ class MessageTool(Tool, ContextAware):
         workspace: str | Path | None = None,
         restrict_to_workspace: bool = False,
     ):
+        """init。
+        
+        初始化 MessageTool 实例。实现方法：把构造参数保存到实例字段，创建后续调用需要复用的缓存、状态容器或运行时依赖。"""
         self._send_callback = send_callback
         self._workspace = (
             Path(workspace).expanduser() if workspace is not None else get_workspace_path()
@@ -100,6 +103,9 @@ class MessageTool(Tool, ContextAware):
 
     @classmethod
     def create(cls, ctx: Any) -> Tool:
+        """create。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         send_callback = ctx.bus.publish_outbound if ctx.bus else None
         return cls(
             send_callback=send_callback,
@@ -108,55 +114,83 @@ class MessageTool(Tool, ContextAware):
         )
 
     def set_context(self, ctx: RequestContext) -> None:
-        """记录当前请求上下文，作为默认发送目标。"""
+        """记录当前请求上下文，作为默认发送目标。
+        
+        实现方法：把新值写入实例状态，并同步更新依赖该状态的子组件或上下文变量。"""
         self._default_channel.set(ctx.channel)
         self._default_chat_id.set(ctx.chat_id)
         self._default_message_id.set(ctx.message_id)
         self._default_metadata.set(dict(ctx.metadata or {}))
 
     def set_send_callback(self, callback: Callable[[OutboundMessage], Awaitable[None]]) -> None:
-        """注入真正执行发送的回调函数。"""
+        """注入真正执行发送的回调函数。
+        
+        实现方法：把新值写入实例状态，并同步更新依赖该状态的子组件或上下文变量。"""
         self._send_callback = callback
 
     def start_turn(self) -> None:
-        """开始新 turn 时重置本轮发送痕迹。"""
+        """开始新 turn 时重置本轮发送痕迹。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         self._sent_in_turn = False
         self._turn_delivered_media_var.set(())
 
     def turn_delivered_media_paths(self) -> list[str]:
-        """返回本轮通过该工具发到当前聊天的附件绝对路径。"""
+        """返回本轮通过该工具发到当前聊天的附件绝对路径。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         return list(self._turn_delivered_media_var.get())
 
     def set_record_channel_delivery(self, active: bool):
-        """开启/关闭“记录为主动渠道投递”的状态。"""
+        """开启/关闭“记录为主动渠道投递”的状态。
+        
+        实现方法：把新值写入实例状态，并同步更新依赖该状态的子组件或上下文变量。"""
         return self._record_channel_delivery_var.set(active)
 
     def reset_record_channel_delivery(self, token) -> None:
-        """恢复之前的主动投递记录状态。"""
+        """恢复之前的主动投递记录状态。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         self._record_channel_delivery_var.reset(token)
 
     def set_suppress_delivery(self, active: bool):
-        """让工具“确认发送但不真正投递”，供内部探活/自检使用。"""
+        """让工具“确认发送但不真正投递”，供内部探活/自检使用。
+        
+        实现方法：把新值写入实例状态，并同步更新依赖该状态的子组件或上下文变量。"""
         return self._suppress_delivery_var.set(active)
 
     def reset_suppress_delivery(self, token) -> None:
-        """恢复之前的抑制发送状态。"""
+        """恢复之前的抑制发送状态。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         self._suppress_delivery_var.reset(token)
 
     @property
     def _sent_in_turn(self) -> bool:
+        """sent in turn。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         return self._sent_in_turn_var.get()
 
     @_sent_in_turn.setter
     def _sent_in_turn(self, value: bool) -> None:
+        """sent in turn。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         self._sent_in_turn_var.set(value)
 
     @property
     def name(self) -> str:
+        """name。
+        
+        返回工具或 provider 对外暴露的稳定名称。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return "message"
 
     @property
     def description(self) -> str:
+        """description。
+        
+        返回给模型看的能力说明，帮助模型判断何时调用本工具。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return (
             "Proactively send a message to a user/channel, optionally with file attachments. "
             "Use this for reminders, cross-channel delivery, or explicit proactive sends. "
@@ -170,7 +204,9 @@ class MessageTool(Tool, ContextAware):
         )
 
     def _resolve_media(self, media: list[str]) -> list[str]:
-        """解析附件路径，并在需要时执行工作区边界检查。"""
+        """解析附件路径，并在需要时执行工作区边界检查。
+        
+        实现方法：先规范化名字或路径，再结合配置、预设和默认值得到最终可执行对象。"""
         resolved: list[str] = []
         access = current_tool_workspace(
             self._workspace,
@@ -200,6 +236,9 @@ class MessageTool(Tool, ContextAware):
         buttons: list[list[str]] | None = None,
         **kwargs: Any,
     ) -> str:
+        """execute。
+        
+        实现方法：先校验参数和运行时上下文，再调用具体工具逻辑；异常会被包装成模型可继续修正的文本结果。"""
         from nanobot.utils.helpers import strip_think
 
         # 任何发给用户的内容都不应该包含内部 think 痕迹。

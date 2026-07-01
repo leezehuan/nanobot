@@ -27,6 +27,9 @@ _SKIP_MODULES = frozenset({
 class ToolLoader:
     """工具加载器。"""
     def __init__(self, package: Any = None, *, test_classes: list[type[Tool]] | None = None):
+        """init。
+        
+        初始化 ToolLoader 实例。实现方法：把构造参数保存到实例字段，创建后续调用需要复用的缓存、状态容器或运行时依赖。"""
         if package is None:
             import nanobot.agent.tools as _pkg
             package = _pkg
@@ -36,7 +39,9 @@ class ToolLoader:
         self._plugins: dict[str, type[Tool]] | None = None
 
     def discover(self) -> list[type[Tool]]:
-        """发现内置工具类。"""
+        """发现内置工具类。
+        
+        实现方法：扫描内置模块和插件入口，收集满足工具接口的类并按名字去重。"""
         if self._test_classes is not None:
             return list(self._test_classes)
         if self._discovered is not None:
@@ -69,7 +74,9 @@ class ToolLoader:
         return results
 
     def _discover_plugins(self) -> dict[str, type[Tool]]:
-        """发现通过 entry_points 注册的外部工具插件。"""
+        """发现通过 entry_points 注册的外部工具插件。
+        
+        实现方法：扫描内置模块和插件入口，收集满足工具接口的类并按名字去重。"""
         if self._plugins is not None:
             return self._plugins
         plugins: dict[str, type[Tool]] = {}
@@ -93,7 +100,9 @@ class ToolLoader:
         return plugins
 
     def load(self, ctx: Any, registry: ToolRegistry, *, scope: str = "core") -> list[str]:
-        """按给定作用域加载并注册工具，返回成功注册的工具名列表。"""
+        """按给定作用域加载并注册工具，返回成功注册的工具名列表。
+        
+        实现方法：从配置、内置目录或入口点发现候选项，过滤不可用项后注册到运行时。"""
         registered: list[str] = []
         builtin_names: set[str] = set()
         sources = [(self.discover(), False), (self._discover_plugins().values(), True)]

@@ -29,31 +29,48 @@ class MessageBus:
     """
 
     def __init__(self):
+        # 入站队列：渠道层把收到的用户消息放到这里，等待 AgentLoop 消费。
+        """init。
+        
+        初始化 MessageBus 实例。实现方法：把构造参数保存到实例字段，创建后续调用需要复用的缓存、状态容器或运行时依赖。"""
         self.inbound: asyncio.Queue[InboundMessage] = asyncio.Queue()
+        # 出站队列：AgentLoop 把生成的回复放到这里，等待 ChannelManager 发送。
         self.outbound: asyncio.Queue[OutboundMessage] = asyncio.Queue()
 
     async def publish_inbound(self, msg: InboundMessage) -> None:
-        """发布一条入站消息：渠道把消息投递给 Agent。"""
+        """发布一条入站消息：渠道把消息投递给 Agent。
+        
+        实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
         await self.inbound.put(msg)
 
     async def consume_inbound(self) -> InboundMessage:
-        """消费下一条入站消息；如果队列为空会一直等待。"""
+        """消费下一条入站消息；如果队列为空会一直等待。
+        
+        实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
         return await self.inbound.get()
 
     async def publish_outbound(self, msg: OutboundMessage) -> None:
-        """发布一条出站消息：Agent 把回复交还给渠道层。"""
+        """发布一条出站消息：Agent 把回复交还给渠道层。
+        
+        实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
         await self.outbound.put(msg)
 
     async def consume_outbound(self) -> OutboundMessage:
-        """消费下一条出站消息；如果队列为空会一直等待。"""
+        """消费下一条出站消息；如果队列为空会一直等待。
+        
+        实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
         return await self.outbound.get()
 
     @property
     def inbound_size(self) -> int:
-        """当前等待处理的入站消息数量。"""
+        """当前等待处理的入站消息数量。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         return self.inbound.qsize()
 
     @property
     def outbound_size(self) -> int:
-        """当前等待发送的出站消息数量。"""
+        """当前等待发送的出站消息数量。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         return self.outbound.qsize()

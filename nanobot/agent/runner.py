@@ -142,14 +142,23 @@ class AgentRunner:
     """执行“可调工具”的 LLM 循环，不关心产品层细节。"""
 
     def __init__(self, provider: LLMProvider):
+        """init。
+        
+        初始化 AgentRunner 实例。实现方法：把构造参数保存到实例字段，创建后续调用需要复用的缓存、状态容器或运行时依赖。"""
         self.provider = provider
 
     @staticmethod
     def _merge_message_content(left: Any, right: Any) -> str | list[dict[str, Any]]:
+        """merge message content。
+        
+        实现方法：按顺序合并相邻或同类数据，并在冲突时保留更明确的新值。"""
         if isinstance(left, str) and isinstance(right, str):
             return f"{left}\n\n{right}" if left else right
 
         def _to_blocks(value: Any) -> list[dict[str, Any]]:
+            """to blocks。
+            
+            实现方法：把内部对象字段映射到目标格式，递归转换嵌套结构，并过滤目标协议不需要的空字段。"""
             if isinstance(value, list):
                 return [
                     item if isinstance(item, dict) else {"type": "text", "text": str(item)}
@@ -167,7 +176,9 @@ class AgentRunner:
         messages: list[dict[str, Any]],
         injections: list[dict[str, Any]],
     ) -> None:
-        """把中途注入的 user 消息并回消息链，同时保持角色交替合法。"""
+        """把中途注入的 user 消息并回消息链，同时保持角色交替合法。
+        
+        实现方法：根据当前消息结构构造新增片段，追加到目标列表，并处理空内容、重复项或 provider 特殊字段。"""
         for injection in injections:
             if (
                 messages
@@ -194,7 +205,9 @@ class AgentRunner:
         iteration: int | None = None,
         allow_goal_continue: bool = False,
     ) -> tuple[bool, int]:
-        """尝试消耗待注入消息，并决定当前执行循环是否应该继续。"""
+        """尝试消耗待注入消息，并决定当前执行循环是否应该继续。
+        
+        实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
         injections: list[dict[str, Any]] = []
         real_injection = False
         if injection_cycles < _MAX_INJECTION_CYCLES:
@@ -233,7 +246,9 @@ class AgentRunner:
         return True, injection_cycles
 
     async def _drain_injections(self, spec: AgentRunSpec) -> list[dict[str, Any]]:
-        """通过 injection_callback 拉取待注入用户消息。"""
+        """通过 injection_callback 拉取待注入用户消息。
+        
+        实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
         if spec.injection_callback is None:
             return []
         try:
@@ -292,6 +307,8 @@ class AgentRunner:
 
         【返回值】
         - AgentRunResult: 包含 final_content / messages / tools_used / usage / stop_reason
+
+        实现方法：按回合状态机推进：准备上下文、请求模型、执行工具、保存结果，并在每个阶段同步进度事件。
         """
         hook = spec.hook or AgentHook()
         messages = list(spec.initial_messages)
@@ -389,7 +406,10 @@ class AgentRunner:
         - messages: list[dict] → 当前消息链，会被就地修改（append tool results / assistant messages）
 
         【返回值】
-        - AgentRunResult: 包含 final_content / messages / tools_used / usage / stop_reason / had_injections
+        - AgentRunResult: 包含 final_content / messages / tools_used / usage / stop_reason /
+        had_injections
+
+        实现方法：按回合状态机推进：准备上下文、请求模型、执行工具、保存结果，并在每个阶段同步进度事件。
         """
         final_content: str | None = None
         tools_used: list[str] = []
@@ -748,7 +768,9 @@ class AgentRunner:
         *,
         tools: list[dict[str, Any]] | None,
     ) -> dict[str, Any]:
-        """组装发给 Provider 的请求参数字典。"""
+        """组装发给 Provider 的请求参数字典。
+        
+        实现方法：从配置、上下文和运行时状态收集所需字段，再组装成后续组件可直接使用的数据结构。"""
         kwargs: dict[str, Any] = {
             "messages": messages,
             "tools": tools,
@@ -777,6 +799,8 @@ class AgentRunner:
         - 真正的流式输出
         - 仅进度流式
         - 普通非流式
+
+        实现方法：根据当前运行模式选择同步或流式 provider 调用，并把回调、工具定义和超时参数传入。
         """
         timeout_s: float | None = spec.llm_timeout_s
         if timeout_s is None:
@@ -811,6 +835,9 @@ class AgentRunner:
             and on_progress_accepts_file_edit_events(spec.progress_callback)
         ):
             async def _emit_live_file_edits(events: list[dict[str, Any]]) -> None:
+                """emit live file edits。
+                
+                实现方法：先确认旧内容能唯一定位，再生成替换文本和 diff，最后写回文件并记录状态。"""
                 await invoke_file_edit_progress(spec.progress_callback, events)
 
             live_file_edits = StreamingFileEditTracker(
@@ -820,6 +847,9 @@ class AgentRunner:
             )
 
         async def _tool_call_delta(delta: dict[str, Any]) -> None:
+            """tool call delta。
+            
+            实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
             if live_file_edits is not None:
                 await live_file_edits.update(delta)
 
@@ -829,17 +859,26 @@ class AgentRunner:
         # 3. 普通非流式
         if wants_streaming:
             async def _stream(delta: str) -> None:
+                """stream。
+                
+                实现方法：逐块读取上游事件，把文本增量、工具调用增量和完成信号分别转发给调用方。"""
                 if delta:
                     context.streamed_content = True
                 await hook.on_stream(context, delta)
 
             async def _thinking(delta: str) -> None:
+                """thinking。
+                
+                实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
                 if not delta:
                     return
                 context.streamed_reasoning = True
                 await hook.emit_reasoning(delta)
 
             async def _stream_recover() -> None:
+                """stream recover。
+                
+                实现方法：逐块读取上游事件，把文本增量、工具调用增量和完成信号分别转发给调用方。"""
                 await hook.on_stream_end(context, resuming=True)
 
             coro = self.provider.chat_stream_with_retry(
@@ -855,6 +894,9 @@ class AgentRunner:
             progress_state = {"reasoning_open": False}
 
             async def _stream_progress(delta: str) -> None:
+                """stream progress。
+                
+                实现方法：逐块读取上游事件，把文本增量、工具调用增量和完成信号分别转发给调用方。"""
                 nonlocal stream_buf
                 if not delta:
                     return
@@ -922,11 +964,17 @@ class AgentRunner:
         spec: AgentRunSpec,
         messages: list[dict[str, Any]],
     ):
+        """request finalization retry。
+        
+        实现方法：根据错误类型和 retry-after 提示计算等待时间，等待期间发送心跳进度，再重新执行请求。"""
         retry_messages = self._finalization_retry_messages(messages)
         return await self._request_no_tools(spec, retry_messages)
 
     @staticmethod
     def _finalization_retry_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """finalization retry messages。
+        
+        实现方法：根据错误类型和 retry-after 提示计算等待时间，等待期间发送心跳进度，再重新执行请求。"""
         retry_messages = list(messages)
         retry_messages.append(build_finalization_retry_message())
         return retry_messages
@@ -938,6 +986,9 @@ class AgentRunner:
         messages: list[dict[str, Any]],
         usage: dict[str, int],
     ) -> str | None:
+        """try finalize after max iterations。
+        
+        实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
         retry_messages = self._budget_exhausted_finalization_messages(messages)
         try:
             response = await self._request_no_tools(spec, retry_messages)
@@ -977,6 +1028,9 @@ class AgentRunner:
         spec: AgentRunSpec,
         messages: list[dict[str, Any]],
     ) -> LLMResponse:
+        """request no tools。
+        
+        实现方法：根据当前运行模式选择同步或流式 provider 调用，并把回调、工具定义和超时参数传入。"""
         kwargs = self._build_request_kwargs(spec, messages, tools=None)
         return await self.provider.chat_with_retry(**kwargs)
 
@@ -984,12 +1038,18 @@ class AgentRunner:
     def _budget_exhausted_finalization_messages(
         messages: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
+        """budget exhausted finalization messages。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         retry_messages = list(messages)
         retry_messages.append(build_budget_exhausted_finalization_message())
         return retry_messages
 
     @staticmethod
     def _max_iterations_fallback(spec: AgentRunSpec) -> str:
+        """max iterations fallback。
+        
+        实现方法：在主 provider 失败或返回可降级错误时，按预设顺序切换备用 provider 重试。"""
         if spec.max_iterations_message:
             return spec.max_iterations_message.format(
                 max_iterations=spec.max_iterations,
@@ -1006,6 +1066,9 @@ class AgentRunner:
         messages: list[dict[str, Any]],
         response: LLMResponse,
     ) -> dict[str, int]:
+        """usage or estimate。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         usage = self._usage_dict(response.usage)
         total = self._usage_total(usage)
         if total > 0:
@@ -1022,6 +1085,9 @@ class AgentRunner:
         messages: list[dict[str, Any]],
         response: LLMResponse,
     ) -> dict[str, int]:
+        """estimate response usage。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         try:
             tools = spec.tools.get_definitions()
         except Exception:
@@ -1046,6 +1112,9 @@ class AgentRunner:
 
     @staticmethod
     def _usage_dict(usage: dict[str, Any] | None) -> dict[str, int]:
+        """usage dict。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         if not usage:
             return {}
         result: dict[str, int] = {}
@@ -1058,17 +1127,26 @@ class AgentRunner:
 
     @staticmethod
     def _usage_total(usage: dict[str, int]) -> int:
+        """usage total。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         return max(0, usage.get("total_tokens", 0) or (
             usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0)
         ))
 
     @staticmethod
     def _accumulate_usage(target: dict[str, int], addition: dict[str, int]) -> None:
+        """accumulate usage。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         for key, value in addition.items():
             target[key] = target.get(key, 0) + value
 
     @staticmethod
     def _merge_usage(left: dict[str, int], right: dict[str, int]) -> dict[str, int]:
+        """merge usage。
+        
+        实现方法：按顺序合并相邻或同类数据，并在冲突时保留更明确的新值。"""
         merged = dict(left)
         for key, value in right.items():
             merged[key] = merged.get(key, 0) + value
@@ -1081,7 +1159,9 @@ class AgentRunner:
         external_lookup_counts: dict[str, int],
         workspace_violation_counts: dict[str, int],
     ) -> tuple[list[Any], list[dict[str, str]], BaseException | None]:
-        """执行一批工具调用，并收集结果、事件和致命错误。"""
+        """执行一批工具调用，并收集结果、事件和致命错误。
+        
+        实现方法：先校验参数和运行时上下文，再调用具体工具逻辑；异常会被包装成模型可继续修正的文本结果。"""
         batches = self._partition_tool_batches(spec, tool_calls)
         tool_results: list[tuple[Any, dict[str, str], BaseException | None]] = []
         for batch in batches:
@@ -1119,7 +1199,9 @@ class AgentRunner:
         external_lookup_counts: dict[str, int],
         workspace_violation_counts: dict[str, int],
     ) -> tuple[Any, dict[str, str], BaseException | None]:
-        """执行单个工具调用。"""
+        """执行单个工具调用。
+        
+        实现方法：按回合状态机推进：准备上下文、请求模型、执行工具、保存结果，并在每个阶段同步进度事件。"""
         hint = "\n\n[Analyze the error above and try a different approach.]"
         lookup_error = repeated_external_lookup_error(
             tool_call.name,
@@ -1295,6 +1377,9 @@ class AgentRunner:
 
     @classmethod
     def _is_ssrf_violation(cls, text: str) -> bool:
+        """is ssrf violation。
+        
+        实现方法：从输入值和当前配置中提取关键标志，按布尔条件组合判断，并把异常或空值按保守结果处理。"""
         if not text:
             return False
         lowered = text.lower()
@@ -1302,7 +1387,9 @@ class AgentRunner:
 
     @classmethod
     def _is_workspace_violation(cls, text: str) -> bool:
-        """判断一段文本是否看起来像“命中了安全/策略边界”的拒绝信息。"""
+        """判断一段文本是否看起来像“命中了安全/策略边界”的拒绝信息。
+        
+        实现方法：从输入值和当前配置中提取关键标志，按布尔条件组合判断，并把异常或空值按保守结果处理。"""
         if not text:
             return False
         lowered = text.lower()
@@ -1319,7 +1406,9 @@ class AgentRunner:
         tool_call: ToolCallRequest,
         workspace_violation_counts: dict[str, int],
     ) -> tuple[Any, dict[str, str], BaseException | None] | None:
-        """识别安全边界类失败，并转成“可恢复但不可绕过”的错误反馈。"""
+        """识别安全边界类失败，并转成“可恢复但不可绕过”的错误反馈。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         if self._is_ssrf_violation(raw_text):
             logger.warning(
                 "Tool {} blocked by SSRF guard; returning non-retryable tool error: {}",
@@ -1352,11 +1441,17 @@ class AgentRunner:
 
     @classmethod
     def _ssrf_soft_payload(cls, raw_text: str) -> str:
+        """ssrf soft payload。
+        
+        实现方法：从配置、内置目录或入口点发现候选项，过滤不可用项后注册到运行时。"""
         text = raw_text.strip() or "Error: request blocked by SSRF guard"
         return f"{text}\n\n{cls._SSRF_BOUNDARY_NOTE}"
 
     @staticmethod
     def _event_detail(prefix: str, text: str, limit: int = 160) -> str:
+        """event detail。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         return (prefix + text.replace("\n", " ").strip())[:limit]
 
     async def _emit_checkpoint(
@@ -1364,13 +1459,18 @@ class AgentRunner:
         spec: AgentRunSpec,
         payload: dict[str, Any],
     ) -> None:
+        """emit checkpoint。
+        
+        实现方法：在异步上下文中串联必要的 I/O、回调和状态更新步骤，遇到可恢复异常时返回结构化错误而不是让整轮崩溃。"""
         callback = spec.checkpoint_callback
         if callback is not None:
             await callback(payload)
 
     @staticmethod
     def _append_final_message(messages: list[dict[str, Any]], content: str | None) -> None:
-        """安全地把最终 assistant 消息追加到消息链尾部。"""
+        """安全地把最终 assistant 消息追加到消息链尾部。
+        
+        实现方法：根据当前消息结构构造新增片段，追加到目标列表，并处理空内容、重复项或 provider 特殊字段。"""
         if not content:
             return
         if (
@@ -1386,6 +1486,9 @@ class AgentRunner:
 
     @staticmethod
     def _append_model_error_placeholder(messages: list[dict[str, Any]]) -> None:
+        """append model error placeholder。
+        
+        实现方法：根据当前消息结构构造新增片段，追加到目标列表，并处理空内容、重复项或 provider 特殊字段。"""
         if messages and messages[-1].get("role") == "assistant" and not messages[-1].get("tool_calls"):
             return
         messages.append(build_assistant_message(_PERSISTED_MODEL_ERROR_PLACEHOLDER))
@@ -1397,7 +1500,9 @@ class AgentRunner:
         tool_name: str,
         result: Any,
     ) -> Any:
-        """规范化工具结果，并在必要时把超大结果落盘后回填引用。"""
+        """规范化工具结果，并在必要时把超大结果落盘后回填引用。
+        
+        实现方法：把输入统一成内部约定格式，处理大小写、空值、别名或 provider 差异。"""
         result = ensure_nonempty_tool_result(tool_name, result)
         if tool_name in _TOOL_RESULT_OFFLOAD_EXEMPT_TOOLS:
             # 这些豁免工具会自己控制输出体积与格式，
@@ -1426,7 +1531,9 @@ class AgentRunner:
     def _drop_orphan_tool_results(
         messages: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """删除没有前置 tool_call 声明的孤儿 tool result。"""
+        """删除没有前置 tool_call 声明的孤儿 tool result。
+        
+        实现方法：扫描消息序列并识别无法继续回放的项，只保留仍有上游引用或安全可发送的消息。"""
         declared: set[str] = set()
         updated: list[dict[str, Any]] | None = None
         for idx, msg in enumerate(messages):
@@ -1452,7 +1559,9 @@ class AgentRunner:
     def _backfill_missing_tool_results(
         messages: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """为缺失 tool result 的工具调用补一条合成错误结果。"""
+        """为缺失 tool result 的工具调用补一条合成错误结果。
+        
+        实现方法：检查模型消息中缺失的工具结果，为每个缺口补入占位结果，保证后续 provider 重放时消息链完整。"""
         declared: list[tuple[int, str, str]] = []  # (assistant_idx, call_id, name)
         fulfilled: set[str] = set()
         for idx, msg in enumerate(messages):
@@ -1491,7 +1600,9 @@ class AgentRunner:
 
     @staticmethod
     def _microcompact(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """把较旧且较长的可压缩 tool result 缩成一行摘要。"""
+        """把较旧且较长的可压缩 tool result 缩成一行摘要。
+        
+        实现方法：在不改变当前任务关键上下文的前提下，压缩过长历史或工具结果，减少后续 provider 请求的 token 压力。"""
         compactable_indices: list[int] = []
         for idx, msg in enumerate(messages):
             if msg.get("role") == "tool" and msg.get("name") in _COMPACTABLE_TOOLS:
@@ -1520,7 +1631,9 @@ class AgentRunner:
         spec: AgentRunSpec,
         messages: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """对消息链中的 tool result 应用大小预算控制。"""
+        """对消息链中的 tool result 应用大小预算控制。
+        
+        实现方法：在输入对象的副本或当前运行时状态上逐项写入变更，再把相关缓存、子组件或事件同步更新。"""
         updated = messages
         for idx, message in enumerate(messages):
             if message.get("role") != "tool":
@@ -1542,7 +1655,9 @@ class AgentRunner:
         spec: AgentRunSpec,
         messages: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """在上下文超预算时，从历史前部裁剪消息。"""
+        """在上下文超预算时，从历史前部裁剪消息。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         if not messages or not spec.context_window_tokens:
             return messages
 
@@ -1618,6 +1733,9 @@ class AgentRunner:
         spec: AgentRunSpec,
         tool_calls: list[ToolCallRequest],
     ) -> list[list[ToolCallRequest]]:
+        """partition tool batches。
+        
+        实现方法：遍历工具调用并按互斥、并发安全和只读属性分组，让 Runner 能安全地分批执行。"""
         if not spec.concurrent_tools:
             return [[tool_call] for tool_call in tool_calls]
 

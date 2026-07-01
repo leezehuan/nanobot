@@ -54,6 +54,8 @@ class InboundMessage:
         默认规则是 ``channel:chat_id``，也就是“同一渠道下同一个聊天空间共享一个会话”。
         如果某些平台支持更细粒度的线程/子会话，就可以通过
         ``session_key_override`` 显式覆盖。
+
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。
         """
         return self.session_key_override or f"{self.channel}:{self.chat_id}"
 

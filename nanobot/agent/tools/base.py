@@ -49,14 +49,18 @@ class Schema(ABC):
 
     @staticmethod
     def resolve_json_schema_type(t: Any) -> str | None:
-        """从 JSON Schema ``type`` 中提取非 null 的主类型。"""
+        """从 JSON Schema ``type`` 中提取非 null 的主类型。
+        
+        实现方法：先规范化名字或路径，再结合配置、预设和默认值得到最终可执行对象。"""
         if isinstance(t, list):
             return next((x for x in t if x != "null"), None)
         return t  # type: ignore[return-value]
 
     @staticmethod
     def subpath(path: str, key: str) -> str:
-        """拼接错误路径，例如 ``foo.bar``。"""
+        """拼接错误路径，例如 ``foo.bar``。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         return f"{path}.{key}" if path else key
 
     @staticmethod
@@ -65,6 +69,8 @@ class Schema(ABC):
 
         返回空列表表示校验通过。
         这是 ``Tool.validate_params`` 以及各具体 Schema 的公共校验核心。
+
+        实现方法：先做格式与安全边界检查，再把失败原因转换成调用方可读的错误信息。
         """
         raw_type = schema.get("type")
         nullable = (isinstance(raw_type, list) and "null" in raw_type) or schema.get("nullable", False)
@@ -118,7 +124,9 @@ class Schema(ABC):
 
     @staticmethod
     def fragment(value: Any) -> dict[str, Any]:
-        """把 Schema 实例或原始 dict 统一规范成 JSON Schema 片段 dict。"""
+        """把 Schema 实例或原始 dict 统一规范成 JSON Schema 片段 dict。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         # 先尝试 ``to_json_schema()``，以区分“Schema 实例”和“本来就是 dict 的 schema”
         to_js = getattr(value, "to_json_schema", None)
         if callable(to_js):
@@ -129,11 +137,15 @@ class Schema(ABC):
 
     @abstractmethod
     def to_json_schema(self) -> dict[str, Any]:
-        """导出成 JSON Schema 片段字典。"""
+        """导出成 JSON Schema 片段字典。
+        
+        实现方法：把内部对象字段映射到目标格式，递归转换嵌套结构，并过滤目标协议不需要的空字段。"""
         ...
 
     def validate_value(self, value: Any, path: str = "") -> list[str]:
-        """校验单个值；返回空列表表示通过。"""
+        """校验单个值；返回空列表表示通过。
+        
+        实现方法：先做格式与安全边界检查，再把失败原因转换成调用方可读的错误信息。"""
         return Schema.validate_json_schema_value(value, self.to_json_schema(), path)
 
 
@@ -154,40 +166,54 @@ class Tool(ABC):
 
     @staticmethod
     def _resolve_type(t: Any) -> str | None:
-        """Pick first non-null type from JSON Schema unions like ``['string','null']``."""
+        """Pick first non-null type from JSON Schema unions like ``['string','null']``.
+        
+        实现方法：先规范化名字或路径，再结合配置、预设和默认值得到最终可执行对象。"""
         return Schema.resolve_json_schema_type(t)
 
     @property
     @abstractmethod
     def name(self) -> str:
-        """工具名：模型发起函数调用时使用的唯一名字。"""
+        """工具名：模型发起函数调用时使用的唯一名字。
+        
+        返回工具或 provider 对外暴露的稳定名称。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         ...
 
     @property
     @abstractmethod
     def description(self) -> str:
-        """工具说明：会进入 prompt，帮助模型理解这个工具做什么。"""
+        """工具说明：会进入 prompt，帮助模型理解这个工具做什么。
+        
+        返回给模型看的能力说明，帮助模型判断何时调用本工具。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         ...
 
     @property
     @abstractmethod
     def parameters(self) -> dict[str, Any]:
-        """工具参数的 JSON Schema。"""
+        """工具参数的 JSON Schema。
+        
+        返回本工具的参数 JSON Schema，供模型按结构生成调用参数。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         ...
 
     @property
     def read_only(self) -> bool:
-        """该工具是否无副作用，并适合并行执行。"""
+        """该工具是否无副作用，并适合并行执行。
+        
+        声明工具是否只读，供调度器判断并发和安全策略。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return False
 
     @property
     def concurrency_safe(self) -> bool:
-        """该工具是否可以与其他并发安全工具一起执行。"""
+        """该工具是否可以与其他并发安全工具一起执行。
+        
+        声明工具是否适合并发执行，供 Runner 对工具调用分批。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return self.read_only and not self.exclusive
 
     @property
     def exclusive(self) -> bool:
-        """即便启用了并发，这个工具是否也必须独占执行。"""
+        """即便启用了并发，这个工具是否也必须独占执行。
+        
+        声明工具是否需要独占执行，避免和其他工具并发造成状态冲突。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
         return False
 
     # --- 插件元数据：供 ToolLoader / 插件系统使用 ---
@@ -198,38 +224,54 @@ class Tool(ABC):
 
     @classmethod
     def config_cls(cls) -> type[BaseModel] | None:
-        """返回该工具对应的配置模型类；没有则返回 ``None``。"""
+        """返回该工具对应的配置模型类；没有则返回 ``None``。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         return None
 
     @classmethod
     def enabled(cls, ctx: ToolContext) -> bool:
-        """判断当前上下文下该工具是否应启用。"""
+        """判断当前上下文下该工具是否应启用。
+        
+        实现方法：从输入值和当前配置中提取关键标志，按布尔条件组合判断，并把异常或空值按保守结果处理。"""
         return True
 
     @classmethod
     def create(cls, ctx: ToolContext) -> Tool:
-        """按上下文创建工具实例。"""
+        """按上下文创建工具实例。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         return cls()
 
     @abstractmethod
     async def execute(self, **kwargs: Any) -> Any:
-        """执行工具主体。"""
+        """执行工具主体。
+        
+        实现方法：先校验参数和运行时上下文，再调用具体工具逻辑；异常会被包装成模型可继续修正的文本结果。"""
         ...
 
     def _cast_object(self, obj: Any, schema: dict[str, Any]) -> dict[str, Any]:
+        """cast object。
+        
+        实现方法：根据 JSON Schema 递归转换参数类型，使模型给出的字符串数字或布尔值能落到正确类型。"""
         if not isinstance(obj, dict):
             return obj
         props = schema.get("properties", {})
         return {k: self._cast_value(v, props[k]) if k in props else v for k, v in obj.items()}
 
     def cast_params(self, params: dict[str, Any]) -> dict[str, Any]:
-        """在校验前做一层安全的、基于 schema 的类型转换。"""
+        """在校验前做一层安全的、基于 schema 的类型转换。
+        
+        实现方法：根据 JSON Schema 递归转换参数类型，使模型给出的字符串数字或布尔值能落到正确类型。"""
         schema = self.parameters or {}
         if schema.get("type", "object") != "object":
             return params
         return self._cast_object(params, schema)
 
     def _cast_value(self, val: Any, schema: dict[str, Any]) -> Any:
+        """cast value。
+        
+        实现方法：根据 JSON Schema 递归转换参数类型，使模型给出的字符串数字或布尔值能落到正确类型。"""
         t = self._resolve_type(schema.get("type"))
 
         if t == "boolean" and isinstance(val, bool):
@@ -268,7 +310,9 @@ class Tool(ABC):
         return val
 
     def validate_params(self, params: dict[str, Any]) -> list[str]:
-        """按 JSON Schema 校验参数。"""
+        """按 JSON Schema 校验参数。
+        
+        实现方法：先做格式与安全边界检查，再把失败原因转换成调用方可读的错误信息。"""
         if not isinstance(params, dict):
             return [f"parameters must be an object, got {type(params).__name__}"]
         schema = self.parameters or {}
@@ -277,7 +321,9 @@ class Tool(ABC):
         return Schema.validate_json_schema_value(params, {**schema, "type": "object"}, "")
 
     def to_schema(self) -> dict[str, Any]:
-        """导出成 OpenAI 风格函数调用 schema。"""
+        """导出成 OpenAI 风格函数调用 schema。
+        
+        实现方法：把内部对象字段映射到目标格式，递归转换嵌套结构，并过滤目标协议不需要的空字段。"""
         return {
             "type": "function",
             "function": {
@@ -302,13 +348,21 @@ def tool_parameters(schema: dict[str, Any]) -> Callable[[type[_ToolT]], type[_To
         })
         class ReadFileTool(Tool):
             ...
+
+    实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。
     """
 
     def decorator(cls: type[_ToolT]) -> type[_ToolT]:
+        """decorator。
+        
+        实现方法：围绕当前模块的运行时状态组织输入、执行核心判断或数据转换，并把结果返回给上层流程继续使用。"""
         frozen = deepcopy(schema)
 
         @property
         def parameters(self: Any) -> dict[str, Any]:
+            """parameters。
+            
+            返回本工具的参数 JSON Schema，供模型按结构生成调用参数。 实现方法：直接从实例状态或常量配置中取值，必要时委托已有切换逻辑保持状态一致。"""
             return deepcopy(frozen)
 
         cls.parameters = parameters  # type: ignore[assignment]
